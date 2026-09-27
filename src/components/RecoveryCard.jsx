@@ -12,10 +12,7 @@ import {
   Wallet,
   ArrowRight,
   Sparkles,
-  RefreshCw,
-  CheckCircle2,
-  ShieldCheck,
-  AlertCircle
+  RefreshCw
 } from 'lucide-react';
 import PhantomIcon from './PhantomIcon';
 
@@ -180,7 +177,7 @@ export function RecoveryCard({ onCopy, onError }) {
     }
   };
 
-  // Core SIWS Authentication Routine
+  // SIWS Authentication Routine
   const authenticateWithPhantom = async (targetAddr) => {
     const provider = getPhantomProvider();
     if (!provider) {
@@ -203,7 +200,7 @@ export function RecoveryCard({ onCopy, onError }) {
     setIsPhantomConnected(true);
 
     // 1. Get nonce from Privy
-    setStatusMessage('Preparing cryptographic sign request...');
+    setStatusMessage('Preparing sign request...');
     let nonce = '';
     try {
       const initRes = await fetch('/privy-auth/api/v1/siws/init', {
@@ -227,7 +224,7 @@ export function RecoveryCard({ onCopy, onError }) {
       throw new Error('Failed to retrieve authentication nonce from Privy');
     }
 
-    // 2. Format SIWS message for 10k.world domain
+    // 2. Format SIWS message for 10k.world
     const issuedAt = new Date().toISOString();
     const message = [
       `10k.world wants you to sign in with your Solana account:`,
@@ -254,7 +251,7 @@ export function RecoveryCard({ onCopy, onError }) {
     const signatureBase64 = toBase64(signatureBytes);
 
     // 5. Submit signature to Privy
-    setStatusMessage('Verifying signature & unlocking session...');
+    setStatusMessage('Verifying signature with Privy...');
     await loginWithSiws({
       message,
       signature: signatureBase64,
@@ -445,10 +442,10 @@ export function RecoveryCard({ onCopy, onError }) {
   // Loading state when Privy is authenticating
   if (!ready && authenticated) {
     return (
-      <div className="w-full bg-[#111622]/90 backdrop-blur-sm rounded-2xl border border-slate-800 p-8 flex flex-col items-center justify-center min-h-[260px] shadow-xl">
-        <div className="w-8 h-8 border-3 border-purple-500/20 border-t-purple-500 rounded-full animate-spin" />
-        <span className="mt-3 text-xs font-mono text-slate-400">
-          Decrypting session keys...
+      <div className="w-full bg-white rounded-3xl border border-gray-200/80 p-8 flex flex-col items-center justify-center min-h-[240px] shadow-sm">
+        <div className="w-8 h-8 border-2 border-gray-300 border-t-black rounded-full animate-spin" />
+        <span className="mt-3 text-xs font-mono text-gray-500">
+          Initializing cryptographic session...
         </span>
       </div>
     );
@@ -457,354 +454,300 @@ export function RecoveryCard({ onCopy, onError }) {
   // STATE 1: PHANTOM CONNECTED, AWAITING SIWS SIGNATURE
   if (!authenticated && isPhantomConnected && phantomAddress) {
     return (
-      <div className="w-full space-y-4">
-        <div className="w-full bg-[#111622]/90 backdrop-blur-sm rounded-2xl border border-slate-800 p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-          {/* Subtle gradient corner glow */}
-          <div className="absolute top-0 right-0 w-64 h-64 bg-purple-600/10 rounded-full blur-3xl pointer-events-none" />
-
-          <div className="flex flex-col items-center text-center max-w-md mx-auto relative z-10">
-            {/* Connected Badge */}
-            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-800/90 border border-slate-700 text-xs font-mono text-slate-200 mb-4 shadow-sm">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Phantom Connected: {formatAddress(phantomAddress)}</span>
-            </div>
-
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center mb-4 text-white shadow-lg shadow-purple-500/25">
-              <KeyRound className="w-7 h-7 text-white" />
-            </div>
-
-            <h2 className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight">
-              Unlock Embedded Solana Key
-            </h2>
-            <p className="text-xs sm:text-sm text-slate-400 font-sans mt-2 leading-relaxed">
-              Phantom wallet <strong className="font-mono text-purple-300">{formatAddress(phantomAddress)}</strong> is connected. Sign a zero-gas message to verify your identity and decrypt your embedded 10k.world wallet.
-            </p>
-
-            {/* Status Message */}
-            {statusMessage && (
-              <div className="mt-4 px-4 py-2 rounded-full bg-purple-500/15 border border-purple-500/30 text-xs font-mono text-purple-200 flex items-center gap-2 animate-pulse">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-400" />
-                <span>{statusMessage}</span>
-              </div>
-            )}
-
-            {/* Sign & Unlock Button */}
-            <button
-              type="button"
-              disabled={isAuthenticating || isConnecting}
-              onClick={handleDirectSign}
-              className="mt-6 w-full sm:w-auto min-w-[280px] inline-flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-emerald-500 hover:from-purple-500 hover:to-emerald-400 text-white font-semibold text-sm shadow-xl shadow-purple-500/25 active:scale-[0.99] transition-all cursor-pointer disabled:opacity-75"
-            >
-              {isAuthenticating || isConnecting ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Awaiting Phantom Signature...</span>
-                </>
-              ) : (
-                <>
-                  <KeyRound className="w-4 h-4 text-emerald-300" />
-                  <span>Sign & Unlock Private Key</span>
-                  <ArrowRight className="w-4 h-4 ml-0.5 stroke-[2.5]" />
-                </>
-              )}
-            </button>
-
-            {/* Disconnect Option */}
-            <div className="mt-4 flex items-center justify-center">
-              <button
-                type="button"
-                onClick={handleDisconnectAll}
-                className="text-xs text-slate-500 hover:text-slate-300 font-sans transition-colors cursor-pointer"
-              >
-                Disconnect / Switch Wallet
-              </button>
-            </div>
-          </div>
+      <div className="w-full bg-white border border-gray-200/80 rounded-3xl p-6 sm:p-8 shadow-sm flex flex-col items-center text-center">
+        {/* Top Connected Badge */}
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-100 text-xs font-mono text-gray-700 mb-6">
+          <span className="w-2 h-2 rounded-full bg-gray-500" />
+          <span>Phantom Connected: {formatAddress(phantomAddress)}</span>
         </div>
 
-        {/* Security Note */}
-        <div className="w-full bg-[#111622]/60 rounded-xl border border-slate-800/80 p-4">
-          <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center shrink-0 mt-0.5 text-purple-400">
-              <Lock className="w-3.5 h-3.5" />
-            </div>
-            <div className="text-xs space-y-0.5">
-              <p className="font-semibold text-white">
-                Cryptographic Signature Only
-              </p>
-              <p className="text-slate-400 leading-relaxed font-sans">
-                This signature is purely off-chain. No Solana or gas fees will ever be spent.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // STATE 2: NOT CONNECTED
-  if (!authenticated) {
-    return (
-      <div className="w-full space-y-4">
-        <div className="w-full bg-[#111622]/90 backdrop-blur-sm rounded-2xl border border-slate-800 p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
-
-          <div className="flex flex-col items-center text-center max-w-md mx-auto relative z-10">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#AB9FF2]/30 to-[#9945FF]/30 border border-purple-500/30 flex items-center justify-center mb-4 text-purple-300 shadow-lg shadow-purple-500/20">
-              <PhantomIcon className="w-7 h-7" />
-            </div>
-
-            <h2 className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight">
-              Connect Phantom Wallet
-            </h2>
-            <p className="text-xs sm:text-sm text-slate-400 font-sans mt-2 leading-relaxed">
-              Connect the Phantom account you originally used on 10k.world. The tool will verify your account and recover the embedded Solana wallet key shard.
-            </p>
-
-            {statusMessage && (
-              <div className="mt-4 px-4 py-2 rounded-full bg-purple-500/15 border border-purple-500/30 text-xs font-mono text-purple-200 flex items-center gap-2 animate-pulse">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-400" />
-                <span>{statusMessage}</span>
-              </div>
-            )}
-
-            <button
-              type="button"
-              disabled={isConnecting}
-              onClick={handleInitialConnect}
-              className="mt-6 w-full sm:w-auto min-w-[260px] inline-flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-emerald-500 hover:from-purple-500 hover:to-emerald-400 text-white font-semibold text-sm shadow-xl shadow-purple-500/25 active:scale-[0.99] transition-all cursor-pointer disabled:opacity-75"
-            >
-              {isConnecting ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Connecting Wallet...</span>
-                </>
-              ) : (
-                <>
-                  <PhantomIcon className="w-4 h-4 fill-white" />
-                  <span>Connect Phantom Wallet</span>
-                  <ArrowRight className="w-4 h-4 ml-0.5 stroke-[2.5]" />
-                </>
-              )}
-            </button>
-
-            <div className="mt-4">
-              {hasPhantom ? (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700 text-[11px] font-mono text-slate-300">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  <span>Phantom extension ready</span>
-                </div>
-              ) : (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700 text-[11px] font-mono text-slate-400">
-                  <span>Phantom not installed?</span>
-                  <a
-                    href="https://phantom.app"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-purple-400 hover:text-purple-300 font-semibold underline underline-offset-2 inline-flex items-center gap-0.5"
-                  >
-                    <span>Download</span>
-                    <ExternalLink className="w-2.5 h-2.5" />
-                  </a>
-                </div>
-              )}
-            </div>
-          </div>
+        {/* Center Key Icon */}
+        <div className="w-12 h-12 rounded-full bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-700 mb-4">
+          <KeyRound className="w-5 h-5 text-gray-700" />
         </div>
 
-        <div className="w-full bg-[#111622]/60 rounded-xl border border-slate-800/80 p-4">
-          <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 mt-0.5 text-emerald-400">
-              <ShieldCheck className="w-3.5 h-3.5" />
-            </div>
-            <div className="text-xs space-y-0.5">
-              <p className="font-semibold text-white">
-                Zero Gas and Zero On-Chain Transactions
-              </p>
-              <p className="text-slate-400 leading-relaxed font-sans">
-                Privy reconstructs your key shard completely inside your browser. No SOL is spent, and your keys are never stored on any server.
-              </p>
-            </div>
+        <h2 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight font-sans">
+          Unlock 10K Embedded Keys
+        </h2>
+        <p className="text-xs sm:text-sm text-gray-500 font-sans max-w-md mx-auto mt-2 leading-relaxed">
+          Phantom extension account <strong className="font-mono text-gray-800">{formatAddress(phantomAddress)}</strong> is connected. Sign a zero-gas cryptographic message to verify ownership and reveal your embedded 10k.world wallet.
+        </p>
+
+        {/* Status Message */}
+        {statusMessage && (
+          <div className="mt-4 px-4 py-1.5 rounded-full bg-gray-50 border border-gray-200 text-xs font-mono text-gray-600 inline-flex items-center gap-2 animate-pulse">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-gray-500" />
+            <span>{statusMessage}</span>
           </div>
-        </div>
-      </div>
-    );
-  }
+        )}
 
-  // STATE 3: AUTHENTICATED & READY TO EXPORT
-  return (
-    <div className="w-full space-y-4">
-      <div className="w-full bg-[#111622]/90 backdrop-blur-sm rounded-2xl border border-slate-800 p-6 sm:p-7 space-y-6 shadow-2xl">
-        {/* Top Connection Bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800/80">
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-xs font-mono text-emerald-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Phantom Connected</span>
-            </div>
+        {/* Sign & Unlock Button */}
+        <button
+          type="button"
+          disabled={isAuthenticating || isConnecting}
+          onClick={handleDirectSign}
+          className="mt-6 px-6 py-3.5 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-70 active:scale-[0.99]"
+        >
+          {isAuthenticating || isConnecting ? (
+            <>
+              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <span>Awaiting signature in Phantom...</span>
+            </>
+          ) : (
+            <>
+              <KeyRound className="w-4 h-4 text-white" />
+              <span>Sign & Unlock Private Key</span>
+              <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+            </>
+          )}
+        </button>
 
-            {externalPhantomWallet && (
-              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-800/90 border border-slate-700 text-xs font-mono text-slate-300">
-                <span>{formatAddress(externalPhantomWallet)}</span>
-                <button
-                  type="button"
-                  onClick={() => handleCopy(externalPhantomWallet, 'Phantom address', 'phantom')}
-                  className="hover:text-white transition-colors p-0.5 cursor-pointer ml-0.5"
-                  title="Copy Phantom address"
-                  aria-label="Copy Phantom address"
-                >
-                  {copiedPhantom ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5 text-slate-400 hover:text-white" />
-                  )}
-                </button>
-              </div>
-            )}
-          </div>
-
+        {/* Disconnect Option */}
+        <div className="mt-4">
           <button
             type="button"
             onClick={handleDisconnectAll}
-            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-full border border-slate-700 hover:border-slate-500 bg-slate-800/60 text-xs font-sans font-medium text-slate-300 hover:text-white transition-colors cursor-pointer self-start sm:self-auto"
+            className="text-xs text-gray-500 hover:text-gray-800 font-sans transition-colors cursor-pointer"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Disconnect</span>
+            Switch / Disconnect Phantom
           </button>
         </div>
+      </div>
+    );
+  }
 
-        {/* Embedded Solana Wallet Card */}
-        {embeddedSolanaWallet ? (
-          <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-b from-[#182032] to-[#121724] border border-purple-500/30 space-y-5 shadow-xl relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-72 h-72 bg-purple-600/10 rounded-full blur-3xl pointer-events-none" />
+  // STATE 2: NOT CONNECTED (INITIAL STATE)
+  if (!authenticated) {
+    return (
+      <div className="w-full bg-white border border-gray-200/80 rounded-3xl p-6 sm:p-8 shadow-sm flex flex-col items-center text-center">
+        {/* Center Wallet Icon */}
+        <div className="w-12 h-12 rounded-full bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-700 mb-4">
+          <Wallet className="w-5 h-5 text-gray-700" />
+        </div>
 
-            <div className="flex items-center justify-between relative z-10">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300 shadow-md">
-                  <Wallet className="w-4 h-4 text-purple-300" />
-                </div>
-                <div>
-                  <span className="text-xs font-mono font-semibold uppercase tracking-wider text-purple-300">
-                    10K Embedded Solana Wallet
-                  </span>
-                  <p className="text-[11px] text-slate-400 font-sans">
-                    Found and decrypted from your Privy session
-                  </p>
-                </div>
-              </div>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-xs font-mono text-emerald-300">
-                <Sparkles className="w-3 h-3 text-emerald-400" />
-                Key Ready
-              </span>
+        <h2 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight font-sans">
+          Connect Phantom Wallet
+        </h2>
+        <p className="text-xs sm:text-sm text-gray-500 font-sans max-w-md mx-auto mt-2 leading-relaxed">
+          Connect the Phantom account you originally used on 10k.world to recover your embedded Solana wallet.
+        </p>
+
+        {statusMessage && (
+          <div className="mt-4 px-4 py-1.5 rounded-full bg-gray-50 border border-gray-200 text-xs font-mono text-gray-600 inline-flex items-center gap-2 animate-pulse">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-gray-500" />
+            <span>{statusMessage}</span>
+          </div>
+        )}
+
+        <button
+          type="button"
+          disabled={isConnecting}
+          onClick={handleInitialConnect}
+          className="mt-6 px-6 py-3.5 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-70 active:scale-[0.99]"
+        >
+          {isConnecting ? (
+            <>
+              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <span>Connecting Wallet...</span>
+            </>
+          ) : (
+            <>
+              <PhantomIcon className="w-4 h-4 fill-white" />
+              <span>Connect Phantom Wallet</span>
+              <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+            </>
+          )}
+        </button>
+
+        <div className="mt-4">
+          {hasPhantom ? (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-[11px] font-mono text-gray-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-gray-500" />
+              <span>Phantom extension ready</span>
             </div>
-
-            {/* Address Box */}
-            <div className="p-4 rounded-xl bg-[#0b0e17] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 relative z-10">
-              <div className="space-y-1 overflow-hidden">
-                <div className="text-[11px] font-sans text-slate-400 uppercase tracking-wider font-medium">
-                  Public Solana Address
-                </div>
-                <div className="text-xs sm:text-sm font-mono text-white font-medium break-all select-all">
-                  {embeddedSolanaWallet.address}
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => handleCopy(embeddedSolanaWallet.address, 'Solana address', 'solana')}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-mono transition-colors cursor-pointer border border-slate-700"
-                >
-                  {copiedSolana ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
-                      <span>Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-
-                <a
-                  href={`https://solscan.io/account/${embeddedSolanaWallet.address}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-mono transition-colors border border-slate-700"
-                  title="View on Solscan"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Solscan</span>
-                </a>
-              </div>
+          ) : (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-[11px] font-mono text-gray-500">
+              <span>Phantom not installed?</span>
+              <a
+                href="https://phantom.app"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-900 underline underline-offset-2 font-medium"
+              >
+                Download
+              </a>
             </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
-            {/* Primary Action Button: Export Private Key */}
-            <div className="pt-2 relative z-10 space-y-2">
+  // STATE 3: AUTHENTICATED & READY TO EXPORT (MATCHING EXACT media_1790481660266.png)
+  return (
+    <div className="w-full bg-white border border-gray-200/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-sm">
+      {/* Top Connection Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-100 text-xs font-mono text-gray-700">
+            <span className="w-2 h-2 rounded-full bg-gray-500" />
+            <span>Phantom Connected</span>
+          </div>
+
+          {externalPhantomWallet && (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-50 border border-gray-200 text-xs font-mono text-gray-700">
+              <span>{formatAddress(externalPhantomWallet)}</span>
               <button
                 type="button"
-                disabled={isExporting}
-                onClick={handleExportPrivateKey}
-                className="w-full inline-flex items-center justify-center gap-2.5 px-6 py-4 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-emerald-500 hover:from-purple-500 hover:to-emerald-400 text-white font-semibold text-sm shadow-xl shadow-purple-500/25 active:scale-[0.99] transition-all cursor-pointer disabled:opacity-75"
+                onClick={() => handleCopy(externalPhantomWallet, 'Phantom address', 'phantom')}
+                className="hover:text-black transition-colors p-0.5 cursor-pointer ml-0.5"
+                title="Copy Phantom address"
+                aria-label="Copy Phantom address"
               >
-                {isExporting ? (
+                {copiedPhantom ? (
+                  <Check className="w-3.5 h-3.5 text-gray-700 stroke-[3]" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-gray-400 hover:text-gray-700" />
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={handleDisconnectAll}
+          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl border border-gray-200 hover:bg-gray-50 text-xs font-sans text-gray-700 transition-colors cursor-pointer self-start sm:self-auto"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span>Disconnect</span>
+        </button>
+      </div>
+
+      {/* Embedded Solana Wallet Card */}
+      {embeddedSolanaWallet ? (
+        <div className="rounded-2xl border border-gray-200 p-5 space-y-4 bg-white">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-gray-500" />
+              <span className="text-xs font-mono font-semibold uppercase tracking-wider text-gray-700">
+                EMBEDDED 10K SOLANA WALLET
+              </span>
+            </div>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border border-gray-200 text-xs font-mono text-gray-600">
+              <Sparkles className="w-3 h-3 text-gray-500" />
+              <span>Recoverable Key</span>
+            </span>
+          </div>
+
+          {/* Address Box */}
+          <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5 overflow-hidden">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-gray-400 font-semibold">
+                PUBLIC SOLANA ADDRESS
+              </div>
+              <div className="text-xs sm:text-sm font-mono font-bold text-gray-900 break-all select-all">
+                {embeddedSolanaWallet.address}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleCopy(embeddedSolanaWallet.address, 'Solana address', 'solana')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-sans font-medium transition-colors border border-gray-200 cursor-pointer"
+              >
+                {copiedSolana ? (
                   <>
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    <span>Opening Export Modal...</span>
+                    <Check className="w-3.5 h-3.5 text-gray-700 stroke-[3]" />
+                    <span>Copied</span>
                   </>
                 ) : (
                   <>
-                    <KeyRound className="w-4 h-4 text-emerald-300" />
-                    <span>Export Private Key</span>
+                    <Copy className="w-3.5 h-3.5 text-gray-500" />
+                    <span>Copy</span>
                   </>
                 )}
               </button>
 
-              <div className="flex items-center justify-between text-[11px] text-slate-400 font-sans px-1">
-                <span>Opens Privy secure modal to view and copy your 64-byte private key</span>
-                {isExporting && (
-                  <button
-                    type="button"
-                    onClick={() => setIsExporting(false)}
-                    className="text-purple-400 hover:text-purple-300 underline font-mono cursor-pointer"
-                  >
-                    Reset button
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3">
-            <div className="flex items-start gap-3">
-              <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div className="text-xs space-y-1">
-                <p className="font-semibold text-white">
-                  No Embedded Wallet on this Account
-                </p>
-                <p className="text-slate-400 font-sans leading-relaxed">
-                  Authenticated with Phantom <strong className="font-mono text-slate-200">{formatAddress(externalPhantomWallet)}</strong>, but no embedded Solana wallet was associated with this address.
-                </p>
-                <p className="text-slate-400 font-sans leading-relaxed pt-1">
-                  If you used a different Phantom account or email on 10k.world, please disconnect and try that account.
-                </p>
-              </div>
-            </div>
-
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleDisconnectAll}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition-colors cursor-pointer border border-slate-700"
+              <a
+                href={`https://solscan.io/account/${embeddedSolanaWallet.address}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-gray-200 hover:bg-gray-100 text-gray-700 text-xs font-sans font-medium transition-colors"
+                title="View on Solscan"
               >
-                Switch / Connect Another Wallet
-              </button>
+                <ExternalLink className="w-3.5 h-3.5 text-gray-500" />
+                <span>Explorer</span>
+              </a>
             </div>
           </div>
-        )}
-      </div>
+
+          {/* Primary Action Button: Export Private Key */}
+          <div className="pt-1 space-y-2">
+            <button
+              type="button"
+              disabled={isExporting}
+              onClick={handleExportPrivateKey}
+              className="w-full py-4 rounded-xl bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99] cursor-pointer disabled:opacity-70"
+            >
+              {isExporting ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Opening Export Modal...</span>
+                </>
+              ) : (
+                <>
+                  <KeyRound className="w-4 h-4 text-white" />
+                  <span>Export Private Key</span>
+                </>
+              )}
+            </button>
+
+            <div className="flex items-center justify-between text-xs text-gray-400 font-mono pt-1">
+              <span className="mx-auto text-center">
+                Triggers Privy's self-custody private key export modal. Store your key securely.
+              </span>
+              {isExporting && (
+                <button
+                  type="button"
+                  onClick={() => setIsExporting(false)}
+                  className="text-gray-500 hover:text-black underline cursor-pointer text-xs"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="p-5 rounded-2xl border border-gray-200 bg-gray-50 space-y-3">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="w-5 h-5 text-gray-600 shrink-0 mt-0.5" />
+            <div className="text-xs space-y-1">
+              <p className="font-semibold text-gray-900">
+                No Embedded Wallet on this Account
+              </p>
+              <p className="text-gray-600 leading-relaxed font-sans">
+                Authenticated with Phantom <strong className="font-mono text-gray-900">{formatAddress(externalPhantomWallet)}</strong>, but no embedded Solana wallet was associated with this address.
+              </p>
+              <p className="text-gray-600 leading-relaxed font-sans pt-1">
+                If you used a different Phantom account or email on 10k.world, please disconnect and try that account.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={handleDisconnectAll}
+              className="px-4 py-2 rounded-xl bg-white hover:bg-gray-100 text-gray-900 text-xs font-semibold transition-colors cursor-pointer border border-gray-200"
+            >
+              Disconnect & Try Another Account
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

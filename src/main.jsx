@@ -32,20 +32,20 @@ class ErrorBoundary extends Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#0a0d14] text-white flex items-center justify-center p-6 font-sans">
-          <div className="max-w-md w-full bg-[#111622] rounded-2xl border border-slate-800 p-6 space-y-4 text-center shadow-2xl">
-            <div className="w-12 h-12 rounded-xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center mx-auto text-purple-400 font-bold font-mono">
+        <div className="min-h-screen bg-gray-50 text-gray-900 flex items-center justify-center p-6 font-sans">
+          <div className="max-w-md w-full bg-white rounded-2xl border border-gray-200 p-6 space-y-4 text-center shadow-lg">
+            <div className="w-12 h-12 rounded-xl bg-red-50 border border-red-200 flex items-center justify-center mx-auto text-red-500 font-bold font-mono">
               !
             </div>
-            <h2 className="text-lg font-display font-bold text-white">
+            <h2 className="text-lg font-bold text-gray-900">
               Something went wrong
             </h2>
-            <p className="text-xs font-mono text-slate-400 break-words bg-slate-900/80 p-3.5 rounded-xl border border-slate-800 text-left">
+            <p className="text-xs font-mono text-gray-600 break-words bg-gray-50 p-3.5 rounded-xl border border-gray-200 text-left">
               {this.state.error?.message || 'Unknown runtime error'}
             </p>
             <button
               onClick={() => window.location.reload()}
-              className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-emerald-500 text-white text-xs font-semibold hover:opacity-90 transition-opacity"
+              className="px-6 py-2.5 rounded-full bg-black text-white text-xs font-semibold hover:bg-gray-800 transition-colors"
             >
               Reload Page
             </button>
@@ -64,8 +64,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       config={{
         loginMethods: ['wallet'],
         appearance: {
-          theme: 'dark',
-          accentColor: '#9945FF',
+          theme: 'light',
+          accentColor: '#000000',
           walletChainType: 'solana-only',
           showWalletLoginFirst: true,
           walletList: ['phantom', 'detected_solana_wallets', 'backpack', 'solflare'],

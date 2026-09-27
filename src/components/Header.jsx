@@ -1,52 +1,42 @@
 import React from 'react';
-import { ShieldCheck, ExternalLink, Sparkles } from 'lucide-react';
+import { ShieldCheck, ExternalLink } from 'lucide-react';
 
 export function Header() {
   return (
-    <header className="w-full border-b border-slate-800/80 bg-[#0c1019]/90 backdrop-blur-md sticky top-0 z-30">
+    <header className="w-full bg-white border-b border-gray-100">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         {/* Brand */}
         <div className="flex items-center gap-3">
-          <a
-            href="/"
-            className="flex items-center gap-2.5 text-white hover:opacity-90 transition-opacity"
-          >
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-purple-600 to-emerald-400 p-0.5 flex items-center justify-center shadow-md shadow-purple-500/20">
-              <div className="w-full h-full bg-[#0c1019] rounded-[10px] flex items-center justify-center font-display font-bold text-xs text-white">
-                10k
-              </div>
-            </div>
-            <div className="flex flex-col">
-              <span className="font-display font-bold text-base tracking-tight text-white leading-none">
-                10k.world
-              </span>
-              <span className="text-[10px] font-mono text-slate-400 leading-tight mt-0.5">
-                Wallet Recovery Tool
-              </span>
-            </div>
-          </a>
+          <div className="flex items-center gap-2">
+            <span className="w-7 h-7 rounded-full bg-black text-white font-bold text-xs flex items-center justify-center tracking-tight">
+              10k
+            </span>
+            <span className="font-bold text-base text-gray-900 tracking-tight font-sans">
+              10k.world
+            </span>
+          </div>
 
-          <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/20 text-[11px] font-mono font-medium text-purple-300">
-            <Sparkles className="w-3 h-3 text-purple-400" />
-            <span>Privy Embedded</span>
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-xs font-mono text-gray-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+            <span>Privy v2 / 10k Recovery</span>
           </div>
         </div>
 
         {/* Right Status Items */}
         <div className="flex items-center gap-3">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-xs font-mono text-emerald-300">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Solana Mainnet</span>
+          <div className="hidden sm:inline-flex items-center gap-1.5 text-xs text-gray-500 font-sans">
+            <ShieldCheck className="w-4 h-4 text-gray-400" />
+            <span>Client-side Cryptography</span>
           </div>
 
           <a
             href="https://docs.privy.io"
             target="_blank"
             rel="noopener noreferrer"
-            className="hidden sm:inline-flex items-center gap-1 px-3 py-1 rounded-full border border-slate-700 hover:border-slate-500 text-xs font-medium text-slate-300 hover:text-white transition-colors bg-slate-900/60"
+            className="inline-flex items-center gap-1 px-3 py-1 rounded-full border border-gray-200 text-xs font-sans text-gray-700 hover:bg-gray-50 transition-colors"
           >
             <span>Privy Docs</span>
-            <ExternalLink className="w-3 h-3 text-slate-400" />
+            <ExternalLink className="w-3 h-3 text-gray-400" />
           </a>
         </div>
       </div>
