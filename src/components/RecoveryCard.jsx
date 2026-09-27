@@ -689,7 +689,7 @@ export function RecoveryCard({ onCopy, onError }) {
               type="button"
               disabled={isExporting}
               onClick={handleExportPrivateKey}
-              className="w-full py-4 rounded-xl bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99] cursor-pointer disabled:opacity-70"
+              className="w-full py-4 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99] cursor-pointer disabled:opacity-70"
             >
               {isExporting ? (
                 <>
