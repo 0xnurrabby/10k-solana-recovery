@@ -14,22 +14,36 @@ export default async function handler(req, res) {
   }
 
   try {
-    let subpath = req.url.replace(/^\/(api\/)?privy-auth/, '');
+    let subpath = req.query.path || '';
+    if (!subpath) {
+      subpath = req.url.replace(/^\/(api\/)?privy-auth\??/, '');
+    }
     if (subpath.startsWith('/')) {
       subpath = subpath.slice(1);
     }
+
     const targetUrl = `https://auth.privy.io/${subpath}`;
 
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers['content-length'];
-    delete headers.connection;
-    headers.origin = 'https://10k.world';
-    headers.referer = 'https://10k.world/';
+    const forwardHeaders = {
+      'origin': 'https://10k.world',
+      'referer': 'https://10k.world/',
+      'accept': 'application/json',
+      'content-type': req.headers['content-type'] || 'application/json',
+    };
+
+    if (req.headers['privy-app-id']) {
+      forwardHeaders['privy-app-id'] = req.headers['privy-app-id'];
+    }
+    if (req.headers['privy-client-id']) {
+      forwardHeaders['privy-client-id'] = req.headers['privy-client-id'];
+    }
+    if (req.headers['authorization']) {
+      forwardHeaders['authorization'] = req.headers['authorization'];
+    }
 
     const fetchOptions = {
       method: req.method,
-      headers,
+      headers: forwardHeaders,
     };
 
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {

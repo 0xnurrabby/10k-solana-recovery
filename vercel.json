@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/privy-auth/:path*",
-      "destination": "/api/privy-auth"
+      "destination": "/api/privy-auth?path=:path*"
     },
     {
       "source": "/((?!api/|privy-auth/).*)",
