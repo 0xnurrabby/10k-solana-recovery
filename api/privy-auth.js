@@ -14,15 +14,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { path } = req.query;
-    const subpath = Array.isArray(path) ? path.join('/') : path || '';
-    const queryIdx = req.url.indexOf('?');
-    const queryString = queryIdx !== -1 ? req.url.slice(queryIdx) : '';
-    const targetUrl = `https://auth.privy.io/${subpath}${queryString}`;
+    let subpath = req.url.replace(/^\/(api\/)?privy-auth/, '');
+    if (subpath.startsWith('/')) {
+      subpath = subpath.slice(1);
+    }
+    const targetUrl = `https://auth.privy.io/${subpath}`;
 
     const headers = { ...req.headers };
     delete headers.host;
     delete headers['content-length'];
+    delete headers.connection;
     headers.origin = 'https://10k.world';
     headers.referer = 'https://10k.world/';
 

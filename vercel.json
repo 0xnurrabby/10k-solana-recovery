@@ -1,12 +1,11 @@
 {
-  "version": 2,
   "rewrites": [
     {
       "source": "/privy-auth/:path*",
-      "destination": "/api/privy-auth/:path*"
+      "destination": "/api/privy-auth"
     },
     {
-      "source": "/(.*)",
+      "source": "/((?!api/|privy-auth/).*)",
       "destination": "/index.html"
     }
   ]

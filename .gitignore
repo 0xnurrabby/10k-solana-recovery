@@ -37,3 +37,5 @@ pnpm-debug.log*
 test_*.mjs
 bridge_server.mjs
 scratch/
+
+.vercel
