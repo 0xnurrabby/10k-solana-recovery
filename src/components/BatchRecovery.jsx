@@ -39,6 +39,8 @@ export function BatchRecovery({ onCopy, onError }) {
   const [visiblePrivateKeys, setVisiblePrivateKeys] = useState({});
   const [showAllPrivateKeys, setShowAllPrivateKeys] = useState(false);
   const [isBatchExporting, setIsBatchExporting] = useState(false);
+  const [exportSession, setExportSession] = useState(null);
+  const [batchQueue, setBatchQueue] = useState([]);
 
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
@@ -47,6 +49,11 @@ export function BatchRecovery({ onCopy, onError }) {
   const { loginWithSiws } = useLoginWithSiws();
   const solanaWalletsHook = useSolanaWallets();
   const { exportWallet: exportWalletFromHook } = useExportWallet();
+
+  const exportWalletRef = useRef(exportWalletFromHook);
+  exportWalletRef.current = exportWalletFromHook;
+  const solanaWalletsRef = useRef(solanaWalletsHook);
+  solanaWalletsRef.current = solanaWalletsHook;
 
   const detected = parseRecoveryInput(mnemonic);
   const detectedPhrases = detected.phrases;
@@ -223,55 +230,65 @@ export function BatchRecovery({ onCopy, onError }) {
     return false;
   };
 
-  const clearPrivyStorage = () => {
-    try {
-      const toRemove = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.toLowerCase().includes('privy')) toRemove.push(k);
-      }
-      toRemove.forEach((k) => localStorage.removeItem(k));
+  // State Machine for Privy Session & Modal Export
+  // Stage 1: Initialize export session and verify current authentication
+  useEffect(() => {
+    if (!exportSession || exportSession.stage !== 'init') return;
 
-      const toRemoveSession = [];
-      for (let i = 0; i < sessionStorage.length; i++) {
-        const k = sessionStorage.key(i);
-        if (k && k.toLowerCase().includes('privy')) toRemoveSession.push(k);
-      }
-      toRemoveSession.forEach((k) => sessionStorage.removeItem(k));
-    } catch (e) {
-      console.warn('Storage clear notice:', e);
-    }
-  };
+    const { wallet } = exportSession;
+    const isTargetAlreadyAuthenticated =
+      authenticated &&
+      (user?.linkedAccounts?.some(
+        (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
+      ) ||
+        user?.wallet?.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase());
 
-  const handleExportWallet = async (wallet, index) => {
-    if (!wallet.embeddedWalletAddress) {
-      if (onError) onError('No 10k embedded wallet found for this account.');
-      return;
-    }
-
-    try {
-      setExportingIndex(index);
-      const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
-      if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
-
-      // Check if Privy is currently logged in with this exact sub-account
-      const isAlreadyCurrentAccount =
-        authenticated &&
-        user?.linkedAccounts?.some(
-          (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
-        );
-
-      if (!isAlreadyCurrentAccount) {
-        // Unconditionally log out previous session and wipe storage to prevent "Another user has already linked this account"
-        if (onCopy) onCopy(`Preparing clean session for ${accLabel}...`);
+    if (isTargetAlreadyAuthenticated) {
+      setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
+    } else if (authenticated) {
+      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_out' } : null));
+      (async () => {
         try {
           await logout();
+        } catch (e) {
+          console.warn('Logout notice:', e);
+        }
+      })();
+    } else {
+      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
+    }
+  }, [exportSession, authenticated, user, logout]);
+
+  // Stage 2: Wait for logout to finish before starting fresh login
+  useEffect(() => {
+    if (!exportSession || exportSession.stage !== 'logging_out') return;
+
+    if (!authenticated) {
+      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
+    }
+  }, [exportSession, authenticated]);
+
+  // Stage 3: Perform SIWS authentication for target wallet
+  useEffect(() => {
+    if (!exportSession || exportSession.stage !== 'logging_in') return;
+
+    let isCancelled = false;
+    const { wallet, index } = exportSession;
+    const accLabel = wallet.label || `Account ${wallet.accountIndex || index + 1}`;
+
+    const performLogin = async () => {
+      try {
+        if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
+
+        try {
+          localStorage.removeItem('privy:token');
+          localStorage.removeItem('privy:refresh_token');
+          localStorage.removeItem('privy:id_token');
+          sessionStorage.removeItem('privy:token');
+          sessionStorage.removeItem('privy:refresh_token');
+          sessionStorage.removeItem('privy:id_token');
         } catch (e) {}
 
-        clearPrivyStorage();
-        await new Promise((r) => setTimeout(r, 400));
-
-        // Fetch fresh SIWS nonce with credentials: omit
         const initRes = await fetch('/privy-auth/api/v1/siws/init', {
           method: 'POST',
           headers: {
@@ -284,31 +301,30 @@ export function BatchRecovery({ onCopy, onError }) {
 
         const initData = await initRes.json();
         const nonce = initData?.nonce;
-        if (!nonce) {
-          throw new Error('Failed to retrieve fresh authentication nonce from Privy');
-        }
+        if (!nonce) throw new Error('Failed to retrieve authentication nonce from Privy');
 
         const issuedAt = new Date().toISOString();
         const message = [
-          `10k.world wants you to sign in with your Solana account:`,
+          '10k.world wants you to sign in with your Solana account:',
           wallet.phantomAddress,
           '',
           `You are proving you own ${wallet.phantomAddress}.`,
           '',
-          `URI: https://10k.world`,
-          `Version: 1`,
-          `Chain ID: mainnet`,
+          'URI: https://10k.world',
+          'Version: 1',
+          'Chain ID: mainnet',
           `Nonce: ${nonce}`,
           `Issued At: ${issuedAt}`,
-          `Resources:`,
-          `- https://privy.io`,
+          'Resources:',
+          '- https://privy.io',
         ].join('\n');
 
         const msgBytes = new TextEncoder().encode(message);
         const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
         const signatureBase64 = toBase64(sig);
 
-        // Sign into Privy React SDK session
+        if (isCancelled) return;
+
         try {
           await loginWithSiws({
             message,
@@ -319,29 +335,202 @@ export function BatchRecovery({ onCopy, onError }) {
             throw siwsErr;
           }
         }
-      }
 
-      if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key inside modal.`);
-      await new Promise((r) => setTimeout(r, 600));
-
-      // 2. Open Privy export modal for this embedded wallet
-      if (typeof exportWalletFromHook === 'function') {
-        await exportWalletFromHook({ address: wallet.embeddedWalletAddress });
-      } else if (typeof solanaWalletsHook?.exportWallet === 'function') {
-        await solanaWalletsHook.exportWallet({ address: wallet.embeddedWalletAddress });
+        if (!isCancelled) {
+          setExportSession((prev) => (prev ? { ...prev, stage: 'waiting_for_auth' } : null));
+        }
+      } catch (err) {
+        console.error(`Login error for ${accLabel}:`, err);
+        if (!isCancelled) {
+          if (onError) onError(err.message || `Authentication failed for ${accLabel}`);
+          handleFinishSession(false);
+        }
       }
+    };
 
-      // 3. Auto-capture copied private key from clipboard
-      await checkAndCaptureClipboard(index);
-    } catch (err) {
-      console.warn('Export error or dialog closed:', err);
-      await checkAndCaptureClipboard(index);
-      if (!err?.message?.includes('exited') && !err?.message?.includes('cancelled')) {
-        if (onError) onError(err.message || 'Failed to open export modal.');
-      }
-    } finally {
-      setExportingIndex(null);
+    performLogin();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [exportSession?.stage]);
+
+  // Stage 4: Wait for React render tree to update with authenticated user
+  useEffect(() => {
+    if (!exportSession || exportSession.stage !== 'waiting_for_auth') return;
+
+    const { wallet } = exportSession;
+    const isNowTargetAuthenticated =
+      authenticated &&
+      (user?.linkedAccounts?.some(
+        (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
+      ) ||
+        user?.wallet?.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase());
+
+    if (isNowTargetAuthenticated) {
+      setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
+    } else {
+      const fallbackTimer = setTimeout(() => {
+        if (authenticated) {
+          setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
+        }
+      }, 3000);
+      return () => clearTimeout(fallbackTimer);
     }
+  }, [exportSession, authenticated, user]);
+
+  // Stage 5: Open Privy export modal with guaranteed fresh authenticated closure
+  useEffect(() => {
+    if (!exportSession || exportSession.stage !== 'open_modal') return;
+
+    let isSubscribed = true;
+    const { wallet, index } = exportSession;
+    const accLabel = wallet.label || `Account ${wallet.accountIndex || index + 1}`;
+
+    const triggerModal = async () => {
+      try {
+        if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key inside modal.`);
+        await new Promise((r) => setTimeout(r, 250));
+
+        const exportFn = exportWalletRef.current || exportWalletFromHook;
+        const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
+
+        if (typeof exportFn === 'function') {
+          await exportFn({ address: wallet.embeddedWalletAddress });
+        } else if (typeof solanaHook?.exportWallet === 'function') {
+          await solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
+        } else {
+          throw new Error('Privy export wallet function is not available.');
+        }
+
+        await checkAndCaptureClipboard(index);
+      } catch (err) {
+        console.warn('Export modal closed or error:', err);
+        await checkAndCaptureClipboard(index);
+        if (!err?.message?.includes('exited') && !err?.message?.includes('cancelled')) {
+          if (onError) onError(err.message || 'Export modal error');
+        }
+      } finally {
+        if (isSubscribed) {
+          handleFinishSession(true);
+        }
+      }
+    };
+
+    triggerModal();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [exportSession?.stage]);
+
+  const handleFinishSession = (proceedWithBatch = true) => {
+    setExportSession(null);
+    setExportingIndex(null);
+
+    if (!proceedWithBatch || cancelBatchExportRef.current) {
+      setIsBatchExporting(false);
+      setBatchQueue([]);
+      return;
+    }
+
+    setBatchQueue((prevQueue) => {
+      if (prevQueue.length > 0) {
+        const nextItem = prevQueue[0];
+        const remaining = prevQueue.slice(1);
+        setTimeout(() => {
+          setExportingIndex(nextItem.index);
+          setExportSession({
+            wallet: nextItem.wallet,
+            index: nextItem.index,
+            isBatch: true,
+            stage: 'init',
+          });
+        }, 350);
+        return remaining;
+      } else {
+        setIsBatchExporting(false);
+        setTimeout(() => {
+          triggerAutoDownload10kKeys();
+        }, 500);
+        return [];
+      }
+    });
+  };
+
+  const triggerAutoDownload10kKeys = () => {
+    setDiscoveredWallets((latest) => {
+      const captured = latest.map((w) => w.exported10kKey).filter(Boolean);
+      if (captured.length > 0) {
+        const txtContent = captured.join('\n') + '\n';
+        const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '10k_embedded_private_keys.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+        if (onCopy) onCopy(`Export finished! Auto-downloaded ${captured.length} 10K keys (.txt)`);
+      } else {
+        if (onCopy) onCopy('Sequential export completed.');
+      }
+      return latest;
+    });
+  };
+
+  const handleExportWallet = (wallet, index) => {
+    if (!wallet.embeddedWalletAddress) {
+      if (onError) onError('No 10k embedded wallet found for this account.');
+      return;
+    }
+
+    cancelBatchExportRef.current = true;
+    setIsBatchExporting(false);
+    setBatchQueue([]);
+    setExportingIndex(index);
+    setExportSession({
+      wallet,
+      index,
+      isBatch: false,
+      stage: 'init',
+    });
+  };
+
+  const handleBatchExportAll = () => {
+    const pending = discoveredWallets
+      .map((w, idx) => ({ wallet: w, index: idx }))
+      .filter(({ wallet }) => !!wallet.embeddedWalletAddress && !wallet.exported10kKey);
+
+    if (pending.length === 0) {
+      const hasCaptured = discoveredWallets.some((w) => !!w.exported10kKey);
+      if (hasCaptured) {
+        triggerAutoDownload10kKeys();
+      } else {
+        if (onCopy) onCopy('All 10K keys have already been captured!');
+      }
+      return;
+    }
+
+    cancelBatchExportRef.current = false;
+    setIsBatchExporting(true);
+    setBatchQueue(pending.slice(1));
+    setExportingIndex(pending[0].index);
+    setExportSession({
+      wallet: pending[0].wallet,
+      index: pending[0].index,
+      isBatch: true,
+      stage: 'init',
+    });
+    if (onCopy) onCopy(`Starting sequential export for ${pending.length} 10K wallet(s)...`);
+  };
+
+  const handleStopBatchExport = () => {
+    cancelBatchExportRef.current = true;
+    setIsBatchExporting(false);
+    setBatchQueue([]);
+    setExportSession(null);
+    setExportingIndex(null);
+    if (onCopy) onCopy('Stopped sequential export');
   };
 
   const handlePasteKey = async (index) => {
@@ -382,65 +571,6 @@ export function BatchRecovery({ onCopy, onError }) {
       return next;
     });
     if (onCopy) onCopy(`10K key cleared for Account ${index + 1}`);
-  };
-
-  const handleStopBatchExport = () => {
-    cancelBatchExportRef.current = true;
-    setIsBatchExporting(false);
-    if (onCopy) onCopy('Stopped sequential export');
-  };
-
-  const handleBatchExportAll = async () => {
-    const pendingWallets = discoveredWallets
-      .map((w, idx) => ({ wallet: w, idx }))
-      .filter(({ wallet }) => !!wallet.embeddedWalletAddress && !wallet.exported10kKey);
-
-    if (pendingWallets.length === 0) {
-      if (onCopy) onCopy('All 10K keys have already been captured!');
-      return;
-    }
-
-    setIsBatchExporting(true);
-    cancelBatchExportRef.current = false;
-
-    if (onCopy) onCopy(`Starting sequential export for ${pendingWallets.length} 10K wallet(s)...`);
-
-    for (let i = 0; i < pendingWallets.length; i++) {
-      if (cancelBatchExportRef.current) break;
-      const { wallet, idx } = pendingWallets[i];
-      const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
-
-      if (onCopy) onCopy(`[${i + 1}/${pendingWallets.length}] Exporting ${accLabel}... Please copy key inside modal.`);
-      try {
-        await handleExportWallet(wallet, idx);
-        await new Promise((r) => setTimeout(r, 800));
-      } catch (err) {
-        console.warn(`Export failed for ${accLabel}:`, err);
-      }
-    }
-
-    setIsBatchExporting(false);
-
-    // Automatically download all captured keys once finished
-    setTimeout(() => {
-      setDiscoveredWallets((current) => {
-        const captured = current.map((w) => w.exported10kKey).filter(Boolean);
-        if (captured.length > 0) {
-          const txtContent = captured.join('\n') + '\n';
-          const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = '10k_embedded_private_keys.txt';
-          a.click();
-          URL.revokeObjectURL(url);
-          if (onCopy) onCopy(`Export finished! Auto-downloaded ${captured.length} 10K keys (.txt)`);
-        } else {
-          if (onCopy) onCopy('Sequential export completed.');
-        }
-        return current;
-      });
-    }, 600);
   };
 
   const handleRecheckPrivy = async (wallet, index) => {
@@ -485,32 +615,21 @@ export function BatchRecovery({ onCopy, onError }) {
   const handleDownload10kKeysTXT = () => {
     if (discoveredWallets.length === 0) return;
 
-    const capturedKeys = discoveredWallets
-      .map((w) => w.exported10kKey)
-      .filter(Boolean);
+    const uncapturedCount = discoveredWallets.filter(
+      (w) => !!w.embeddedWalletAddress && !w.exported10kKey
+    ).length;
 
-    if (capturedKeys.length === 0) {
-      const has10k = discoveredWallets.some((w) => w.embeddedWalletAddress);
-      if (has10k) {
-        if (onCopy) onCopy('Starting Auto-Export for your 10K embedded wallets... Please copy keys inside modal.');
-        handleBatchExportAll();
-        return;
+    if (uncapturedCount > 0) {
+      if (onCopy) {
+        onCopy(
+          `Starting sequential export for ${uncapturedCount} 10K embedded wallet(s)... Please copy keys inside modal.`
+        );
       }
-      if (onError) {
-        onError('No 10K embedded wallets found to export.');
-      }
+      handleBatchExportAll();
       return;
     }
 
-    const txtContent = capturedKeys.join('\n') + '\n';
-    const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = '10k_embedded_private_keys.txt';
-    a.click();
-    URL.revokeObjectURL(url);
-    if (onCopy) onCopy(`Exported ${capturedKeys.length} 10K embedded private key(s) (.txt) successfully`);
+    triggerAutoDownload10kKeys();
   };
 
   // Dedicated Export for Phantom Sub-Account Private Keys
