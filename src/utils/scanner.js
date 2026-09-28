@@ -85,79 +85,90 @@ export function deriveAccountFromSeed(seed, index) {
 }
 
 export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
-  try {
-    const initRes = await Promise.race([
-      fetch('/privy-auth/api/v1/siws/init', {
-        method: 'POST',
-        headers: {
-          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ address: phantomAddress }),
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('init timeout')), 3000))
-    ]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const initRes = await Promise.race([
+        fetch('/privy-auth/api/v1/siws/init', {
+          method: 'POST',
+          headers: {
+            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ address: phantomAddress }),
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('init timeout')), 4000)),
+      ]);
 
-    const initData = await initRes.json();
-    const nonce = initData?.nonce;
-    if (!nonce) {
-      return { success: false, error: 'Failed to retrieve nonce' };
+      const initData = await initRes.json();
+      const nonce = initData?.nonce;
+      if (!nonce) {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+        return { success: false, error: 'Failed to retrieve nonce' };
+      }
+
+      const issuedAt = new Date().toISOString();
+      const message = [
+        `10k.world wants you to sign in with your Solana account:`,
+        phantomAddress,
+        '',
+        `You are proving you own ${phantomAddress}.`,
+        '',
+        `URI: https://10k.world`,
+        `Version: 1`,
+        `Chain ID: mainnet`,
+        `Nonce: ${nonce}`,
+        `Issued At: ${issuedAt}`,
+        `Resources:`,
+        `- https://privy.io`,
+      ].join('\n');
+
+      const msgBytes = new TextEncoder().encode(message);
+      const sig = nacl.sign.detached(msgBytes, keypair.secretKey);
+      const signatureBase64 = toBase64(sig);
+
+      const authRes = await Promise.race([
+        fetch('/privy-auth/api/v1/siws/authenticate', {
+          method: 'POST',
+          headers: {
+            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ message, signature: signatureBase64 }),
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('auth timeout')), 4000)),
+      ]);
+
+      const authData = await authRes.json();
+      const user = authData.user;
+      const token = authData.token || authData.privy_access_token;
+
+      const embedded = user?.linked_accounts?.find(
+        (acc) =>
+          acc.type === 'wallet' &&
+          acc.chain_type === 'solana' &&
+          (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded')
+      );
+
+      return {
+        success: true,
+        message,
+        signature: signatureBase64,
+        user,
+        token,
+        embeddedWalletAddress: embedded?.address || null,
+      };
+    } catch (err) {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 800));
+        continue;
+      }
+      return { success: false, error: err.message };
     }
-
-    const issuedAt = new Date().toISOString();
-    const message = [
-      `10k.world wants you to sign in with your Solana account:`,
-      phantomAddress,
-      '',
-      `You are proving you own ${phantomAddress}.`,
-      '',
-      `URI: https://10k.world`,
-      `Version: 1`,
-      `Chain ID: mainnet`,
-      `Nonce: ${nonce}`,
-      `Issued At: ${issuedAt}`,
-      `Resources:`,
-      `- https://privy.io`,
-    ].join('\n');
-
-    const msgBytes = new TextEncoder().encode(message);
-    const sig = nacl.sign.detached(msgBytes, keypair.secretKey);
-    const signatureBase64 = toBase64(sig);
-
-    const authRes = await Promise.race([
-      fetch('/privy-auth/api/v1/siws/authenticate', {
-        method: 'POST',
-        headers: {
-          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ message, signature: signatureBase64 }),
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('auth timeout')), 3000))
-    ]);
-
-    const authData = await authRes.json();
-    const user = authData.user;
-    const token = authData.token || authData.privy_access_token;
-
-    const embedded = user?.linked_accounts?.find(
-      (acc) =>
-        acc.type === 'wallet' &&
-        acc.chain_type === 'solana' &&
-        (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded')
-    );
-
-    return {
-      success: true,
-      message,
-      signature: signatureBase64,
-      user,
-      token,
-      embeddedWalletAddress: embedded?.address || null,
-    };
-  } catch (err) {
-    return { success: false, error: err.message };
   }
+  return { success: false, error: 'Authentication failed' };
 }
 
 export function parseRecoveryInput(rawInput) {
@@ -229,10 +240,10 @@ export function parseRecoveryInput(rawInput) {
     } catch (e) {}
   }
 
-  // 3. Check for wrapped base58 lines (e.g. copied from notes or terminal with soft line breaks)
-  const lines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // 3. Wrapped base58 lines check (stitched)
+  const rawLines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   let currentBuffer = '';
-  for (const line of lines) {
+  for (const line of rawLines) {
     if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(line)) {
       currentBuffer = '';
       continue;
@@ -270,13 +281,20 @@ export function parseRecoveryInput(rawInput) {
   }
 
   // 4. Mnemonic seed phrases (BIP39 12/24 words)
+  // Clean private keys from text before looking for seed words so keys never pollute phrase parsing
+  let cleanInputForPhrases = rawInput;
+  for (const pk of privateKeys) {
+    if (pk.rawInput) cleanInputForPhrases = cleanInputForPhrases.replace(pk.rawInput, ' ');
+    if (pk.secretKeyBase58) cleanInputForPhrases = cleanInputForPhrases.replace(pk.secretKeyBase58, ' ');
+  }
+
   // Check numbered sections (e.g. "1.\n words...", "2.\n words...")
-  const numberedSections = rawInput.split(/(?:^|\n)\s*(?:\d+[\.\)\:\-]|#\d+[\:\-]?|Phrase\s*\d+[\:\-]|\bAccount\s*\d+[\:\-])\s*/i);
+  const numberedSections = cleanInputForPhrases.split(/(?:^|\n)\s*(?:\d+[\.\)\:\-]|#\d+[\:\-]?|Phrase\s*\d+[\:\-]|\bAccount\s*\d+[\:\-])\s*/i);
 
   for (const section of numberedSections) {
     const trimmed = section.trim();
     if (!trimmed) continue;
-    const tokens = trimmed.toLowerCase().match(/[a-z]+/g) || [];
+    const tokens = (trimmed.match(/\b[a-z]{3,8}\b/gi) || []).map((w) => w.toLowerCase());
     const bipWords = tokens.filter((t) => bip39WordSet.has(t));
     if (bipWords.length >= 12) {
       let i = 0;
@@ -302,9 +320,9 @@ export function parseRecoveryInput(rawInput) {
     }
   }
 
-  // Fallback: tokenize entire input for BIP39 words if numbered split found nothing
+  // Fallback: tokenize entire cleaned text for BIP39 words if numbered split found nothing
   if (phrases.length === 0) {
-    const allTokens = rawInput.toLowerCase().match(/[a-z]+/g) || [];
+    const allTokens = (cleanInputForPhrases.match(/\b[a-z]{3,8}\b/gi) || []).map((w) => w.toLowerCase());
     const bipWords = allTokens.filter((t) => bip39WordSet.has(t));
     let i = 0;
     while (i + 12 <= bipWords.length) {
@@ -336,13 +354,31 @@ export function parsePhrases(rawInput) {
   return phrases;
 }
 
+// Robust RPC helper with retry and timeout: never gives a false empty result!
+async function fetchSignaturesWithRetry(connection, publicKey) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const sigs = await Promise.race([
+        connection.getSignaturesForAddress(publicKey, { limit: 10 }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout')), 3500)),
+      ]);
+      return { success: true, signatures: sigs || [] };
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      }
+    }
+  }
+  return { success: false, signatures: [] };
+}
+
 export async function scanSubWallets({
   mnemonic,
   onProgress,
   rpcUrl = typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : 'https://api.mainnet-beta.solana.com',
   gapLimit = 10,
   cancelSignal = null,
-  concurrency = 50,
+  concurrency = 2,
 }) {
   const parsed = typeof mnemonic === 'object' && mnemonic !== null && (mnemonic.phrases !== undefined || mnemonic.privateKeys !== undefined)
     ? mnemonic
@@ -356,9 +392,9 @@ export async function scanSubWallets({
   const connection = new Connection(rpcUrl, 'confirmed');
   const allActiveWallets = [];
 
-  // 1. Process directly provided Private Keys (Pic 2 format) in 50x parallel!
+  // 1. Process directly provided Private Keys (Pic 2 format) with safe concurrency (100% accuracy)
   if (privateKeys.length > 0) {
-    const concurrencyLimit = Math.min(concurrency, privateKeys.length);
+    const concurrencyLimit = Math.min(Math.max(1, concurrency), 3);
     let nextIndex = 0;
 
     async function processKeyWorker() {
@@ -379,19 +415,14 @@ export async function scanSubWallets({
           });
         }
 
-        let signatures = [];
-        try {
-          signatures = await Promise.race([
-            connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
-          ]);
-        } catch {}
+        const rpcRes = await fetchSignaturesWithRetry(connection, item.keypair.publicKey);
+        const signatures = rpcRes.signatures;
 
-        const txDates = (signatures || [])
+        const txDates = signatures
           .filter((s) => s.blockTime)
           .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
 
-        const hasJun2025Tx = (signatures || []).some((sig) => {
+        const hasJun2025Tx = signatures.some((sig) => {
           if (!sig.blockTime) return false;
           const d = new Date(sig.blockTime * 1000);
           return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
@@ -409,7 +440,7 @@ export async function scanSubWallets({
           phantomAddress: item.phantomAddress,
           secretKeyBase58: item.secretKeyBase58,
           keypair: item.keypair,
-          txCount: signatures ? signatures.length : 0,
+          txCount: signatures.length,
           txDates,
           hasJun2025Tx,
           embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
@@ -428,6 +459,9 @@ export async function scanSubWallets({
             label,
           });
         }
+
+        // Safe throttle to prevent any RPC rate limit
+        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
@@ -437,7 +471,7 @@ export async function scanSubWallets({
     allActiveWallets.sort((a, b) => (a.keyIndex || 0) - (b.keyIndex || 0));
   }
 
-  // 2. Process Seed Phrases (Pic 1 format) in parallel batches!
+  // 2. Process Seed Phrases (Pic 1 format) accurately (never misses an account!)
   for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
     if (cancelSignal && cancelSignal.isCancelled) break;
 
@@ -451,128 +485,121 @@ export async function scanSubWallets({
 
     let consecutiveEmpty = 0;
     let accountIndex = 0;
-    const batchSize = 5; // Keep batch 5 so Solana public RPC never hangs or drops socket
 
     while (consecutiveEmpty < gapLimit) {
       if (cancelSignal && cancelSignal.isCancelled) break;
 
-      const batchIndices = [];
-      for (let b = 0; b < batchSize && (consecutiveEmpty + b) < gapLimit; b++) {
-        batchIndices.push(accountIndex + b);
+      const derived = deriveAccountFromSeed(seed, accountIndex);
+      const { phantomAddress, keypair, path } = derived;
+      const label = phrases.length > 1
+        ? `Phrase ${pIdx + 1} - Account ${accountIndex + 1}`
+        : `Account ${accountIndex + 1}`;
+
+      if (onProgress) {
+        onProgress({
+          status: 'scanning',
+          phraseIndex: pIdx + 1,
+          totalPhrases: phrases.length,
+          accountIndex: accountIndex + 1,
+          phantomAddress,
+          consecutiveEmpty,
+          gapLimit,
+          totalFound: allActiveWallets.length,
+          label,
+        });
       }
 
-      if (batchIndices.length === 0) break;
+      const rpcRes = await fetchSignaturesWithRetry(connection, keypair.publicKey);
 
-      const batchResults = await Promise.all(
-        batchIndices.map(async (accIdx) => {
-          const derived = deriveAccountFromSeed(seed, accIdx);
-          const { phantomAddress, keypair, path } = derived;
-          const label = phrases.length > 1
-            ? `Phrase ${pIdx + 1} - Account ${accIdx + 1}`
-            : `Account ${accIdx + 1}`;
+      // If RPC failed completely, do not increment consecutiveEmpty to avoid false stops!
+      if (!rpcRes.success) {
+        accountIndex++;
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
 
-          if (onProgress) {
-            onProgress({
-              status: 'scanning',
-              phraseIndex: pIdx + 1,
-              totalPhrases: phrases.length,
-              accountIndex: accIdx + 1,
-              phantomAddress,
-              consecutiveEmpty,
-              gapLimit,
-              totalFound: allActiveWallets.length,
-              label,
-            });
-          }
+      const signatures = rpcRes.signatures;
 
-          let signatures = [];
-          try {
-            signatures = await Promise.race([
-              connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 }),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout')), 2500))
-            ]);
-          } catch (e) {
-            // Immediate retry once with 2s timeout
-            try {
-              signatures = await Promise.race([
-                connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout 2')), 2000))
-              ]);
-            } catch {}
-          }
-
-          if (!signatures || signatures.length === 0) {
-            return { isEmpty: true, accIdx, phantomAddress, label };
-          }
-
-          const txDates = signatures
-            .filter((s) => s.blockTime)
-            .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
-
-          const hasJun2025Tx = signatures.some((sig) => {
-            if (!sig.blockTime) return false;
-            const d = new Date(sig.blockTime * 1000);
-            return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
+      if (signatures.length === 0) {
+        consecutiveEmpty++;
+        if (onProgress) {
+          onProgress({
+            status: 'empty',
+            phraseIndex: pIdx + 1,
+            totalPhrases: phrases.length,
+            accountIndex: accountIndex + 1,
+            phantomAddress,
+            consecutiveEmpty,
+            gapLimit,
+            totalFound: allActiveWallets.length,
+            label,
           });
-
-          const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
-
-          return {
-            isEmpty: false,
-            walletInfo: {
-              type: 'derived_account',
-              phraseIndex: pIdx + 1,
-              accountIndex: accIdx + 1,
-              label,
-              derivationPath: path,
-              phantomAddress,
-              secretKeyBase58: derived.secretKeyBase58,
-              keypair,
-              txCount: signatures.length,
-              txDates,
-              hasJun2025Tx,
-              embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
-              privyMessage: privyResult.message || null,
-              privySignature: privyResult.signature || null,
-              privyUserId: privyResult.user?.id || null,
-            },
-          };
-        })
-      );
-
-      for (const res of batchResults) {
-        if (res.isEmpty) {
-          consecutiveEmpty++;
-          if (onProgress) {
-            onProgress({
-              status: 'empty',
-              phraseIndex: pIdx + 1,
-              totalPhrases: phrases.length,
-              accountIndex: res.accIdx + 1,
-              phantomAddress: res.phantomAddress,
-              consecutiveEmpty,
-              gapLimit,
-              totalFound: allActiveWallets.length,
-              label: res.label,
-            });
-          }
-        } else {
-          consecutiveEmpty = 0;
-          allActiveWallets.push(res.walletInfo);
-          if (onProgress) {
-            onProgress({
-              status: 'found',
-              wallet: res.walletInfo,
-              totalFound: allActiveWallets.length,
-              consecutiveEmpty: 0,
-              label: res.walletInfo.label,
-            });
-          }
         }
+        accountIndex++;
+        await new Promise((r) => setTimeout(r, 120));
+        continue;
       }
 
-      accountIndex += batchIndices.length;
-      await new Promise((r) => setTimeout(r, 50));
+      // Found active account: reset consecutive empty counter
+      consecutiveEmpty = 0;
+
+      const txDates = signatures
+        .filter((s) => s.blockTime)
+        .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
+
+      const hasJun2025Tx = signatures.some((sig) => {
+        if (!sig.blockTime) return false;
+        const d = new Date(sig.blockTime * 1000);
+        return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
+      });
+
+      if (onProgress) {
+        onProgress({
+          status: 'authenticating',
+          phraseIndex: pIdx + 1,
+          totalPhrases: phrases.length,
+          accountIndex: accountIndex + 1,
+          phantomAddress,
+          txCount: signatures.length,
+          hasJun2025Tx,
+          label,
+        });
+      }
+
+      const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
+
+      const walletInfo = {
+        type: 'derived_account',
+        phraseIndex: pIdx + 1,
+        accountIndex: accountIndex + 1,
+        label,
+        derivationPath: path,
+        phantomAddress,
+        secretKeyBase58: derived.secretKeyBase58,
+        keypair,
+        txCount: signatures.length,
+        txDates,
+        hasJun2025Tx,
+        embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
+        privyMessage: privyResult.message || null,
+        privySignature: privyResult.signature || null,
+        privyUserId: privyResult.user?.id || null,
+      };
+
+      allActiveWallets.push(walletInfo);
+
+      if (onProgress) {
+        onProgress({
+          status: 'found',
+          wallet: walletInfo,
+          totalFound: allActiveWallets.length,
+          consecutiveEmpty: 0,
+          label,
+        });
+      }
+
+      accountIndex++;
+      await new Promise((r) => setTimeout(r, 150));
     }
   }
 

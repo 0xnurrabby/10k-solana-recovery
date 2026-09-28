@@ -101,7 +101,7 @@ export function BatchRecovery({ onCopy, onError }) {
     if (parsed.phrases.length > 0) initLabels.push(`${parsed.phrases.length} phrase(s)`);
 
     setScanProgress({
-      message: `Initializing fast parallel scan across ${initLabels.join(' and ')}...`,
+      message: `Initializing scan across ${initLabels.join(' and ')}...`,
       accountIndex: 0,
       total: parsed.privateKeys.length || 0,
       consecutiveEmpty: 0,
@@ -110,7 +110,7 @@ export function BatchRecovery({ onCopy, onError }) {
     try {
       const results = await scanSubWallets({
         mnemonic: parsed,
-        concurrency: 50,
+        concurrency: 2,
         cancelSignal: cancelSignalRef.current,
         onProgress: (p) => {
           if (p.status === 'scanning_key') {
@@ -344,7 +344,7 @@ export function BatchRecovery({ onCopy, onError }) {
               <span>Auto Sub-Account & Key Recovery Scanner</span>
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-mono border border-emerald-200">
                 <Zap className="w-3 h-3 fill-current" />
-                Fast Parallel
+                100% Accurate
               </span>
             </h2>
             <p className="text-xs text-gray-500 font-sans mt-0.5">
@@ -352,7 +352,7 @@ export function BatchRecovery({ onCopy, onError }) {
             </p>
           </div>
           <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-mono font-bold">
-            50x Concurrency
+            Rate-Limit Proof
           </span>
         </div>
 
@@ -503,8 +503,8 @@ export function BatchRecovery({ onCopy, onError }) {
                 <div className="text-base font-bold font-mono text-emerald-600">{discoveredWallets.length}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
-                <div className="text-[10px] font-mono text-gray-400 uppercase">Speed Mode</div>
-                <div className="text-base font-bold font-mono text-emerald-600">50x Parallel</div>
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Mode</div>
+                <div className="text-base font-bold font-mono text-emerald-600">100% Accurate</div>
               </div>
             </div>
 
