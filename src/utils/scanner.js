@@ -384,10 +384,13 @@ export function parsePhrases(rawInput) {
   return phrases;
 }
 
+const HELIUS_RPC = 'https://mainnet.helius-rpc.com/?api-key=14fb606d-9e4a-4943-a82f-ff7b34d1b708';
+
 const RPC_ENDPOINTS = [
-  typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : 'https://api.mainnet-beta.solana.com',
-  'https://api.mainnet.solana.com',
+  HELIUS_RPC,
+  typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : HELIUS_RPC,
   'https://api.mainnet-beta.solana.com',
+  'https://api.mainnet.solana.com',
 ];
 let rpcEndpointIndex = 0;
 
@@ -396,7 +399,7 @@ export async function fetchSignaturesDirect(address) {
     const endpoint = RPC_ENDPOINTS[rpcEndpointIndex % RPC_ENDPOINTS.length];
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -420,14 +423,14 @@ export async function fetchSignaturesDirect(address) {
         console.warn(`[Solana RPC ${endpoint}] Error for ${address}:`, data.error.message || data.error);
         if (data.error.code === 429 || data.error.message?.includes('429') || data.error.message?.includes('Too many requests')) {
           rpcEndpointIndex++;
-          await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
           continue;
         }
       }
     } catch (err) {
       console.warn(`[Solana RPC ${endpoint}] Fetch exception for ${address}:`, err.message);
       rpcEndpointIndex++;
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 600));
     }
   }
   return { success: false, signatures: [] };
@@ -542,6 +545,8 @@ export async function scanSubWallets({
 
     let consecutiveEmpty = 0;
     let accountIndex = 0;
+    let accountRetryCount = 0;
+    const MAX_ACCOUNT_RETRIES = 3;
 
     while (consecutiveEmpty < gapLimit) {
       if (cancelSignal && cancelSignal.isCancelled) break;
@@ -568,20 +573,28 @@ export async function scanSubWallets({
 
       const rpcRes = await fetchSignaturesDirect(phantomAddress);
 
-      // CRITICAL: If RPC failed (e.g. rate limit after retries), DO NOT count as empty!
-      // This prevents premature stops and ensures 100% of accounts are discovered.
+      // CRITICAL: If RPC failed (e.g. rate limit after retries), retry up to MAX_ACCOUNT_RETRIES
+      // This prevents premature stops while avoiding infinite retry loops.
       if (!rpcRes.success) {
-        if (onProgress) {
-          onProgress({
-            status: 'retrying',
-            label,
-            attempt: 1,
-          });
+        accountRetryCount++;
+        if (accountRetryCount <= MAX_ACCOUNT_RETRIES) {
+          if (onProgress) {
+            onProgress({
+              status: 'retrying',
+              label,
+              attempt: accountRetryCount,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 1000 * accountRetryCount));
+          continue;
         }
-        await new Promise((r) => setTimeout(r, 1200));
+        // If all retries failed for this account, advance to the next account to prevent hanging
+        accountRetryCount = 0;
+        accountIndex++;
         continue;
       }
 
+      accountRetryCount = 0;
       const signatures = rpcRes.signatures;
 
       if (signatures.length === 0) {

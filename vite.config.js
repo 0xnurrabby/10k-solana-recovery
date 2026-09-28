@@ -24,10 +24,10 @@ const proxyConfig = {
     },
   },
   '/solana-rpc': {
-    target: 'https://api.mainnet-beta.solana.com',
+    target: 'https://mainnet.helius-rpc.com',
     changeOrigin: true,
     secure: true,
-    rewrite: (path) => path.replace(/^\/solana-rpc/, ''),
+    rewrite: () => '/?api-key=14fb606d-9e4a-4943-a82f-ff7b34d1b708',
     configure: (proxy) => {
       proxy.on('proxyReq', (proxyReq) => {
         proxyReq.removeHeader('origin');
