@@ -283,7 +283,12 @@ export function BatchRecovery({ onCopy, onError }) {
       return false;
     }
 
-    if (lastCapturedKeyRef.current === cleaned && captured10kKeysRef.current.get(targetIdx) === cleaned) {
+    // STRICT CHECK: Reject if key was already captured by ANY other wallet
+    const isAlreadyCapturedByOther = discoveredWalletsRef.current.some(
+      (w, idx) => idx !== targetIdx && w.exported10kKey === cleaned
+    );
+    if (isAlreadyCapturedByOther) {
+      console.warn(`Duplicate key rejected for Account ${targetIdx + 1}: already assigned elsewhere.`);
       return false;
     }
 
@@ -305,7 +310,7 @@ export function BatchRecovery({ onCopy, onError }) {
 
     const accLabel = discoveredWalletsRef.current[targetIdx]?.label || `Account ${targetIdx + 1}`;
     if (onCopy) {
-      onCopy(`Captured key for ${accLabel}! Next wallet loading...`);
+      onCopy(`Captured unique key for ${accLabel}! Next wallet loading...`);
     }
 
     // Instantly close modal upon copy
@@ -319,6 +324,12 @@ export function BatchRecovery({ onCopy, onError }) {
         const text = await navigator.clipboard.readText();
         const cleaned = text?.trim();
         if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
+          const isAlreadyCapturedByOther = discoveredWalletsRef.current.some(
+            (w, idx) => idx !== index && w.exported10kKey === cleaned
+          );
+          if (isAlreadyCapturedByOther) {
+            return false;
+          }
           return handleCapturedKeyDirectly(cleaned, index);
         }
       }
@@ -336,7 +347,13 @@ export function BatchRecovery({ onCopy, onError }) {
       try {
         const cleaned = text?.trim();
         if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
-          handleCapturedKeyDirectly(cleaned);
+          const targetIdx = exportingIndexRef.current;
+          const isAlreadyCapturedByOther =
+            targetIdx !== null &&
+            discoveredWalletsRef.current.some((w, idx) => idx !== targetIdx && w.exported10kKey === cleaned);
+          if (!isAlreadyCapturedByOther) {
+            handleCapturedKeyDirectly(cleaned);
+          }
         }
       } catch (err) {
         console.warn('Intercept writeText notice:', err);
@@ -361,7 +378,7 @@ export function BatchRecovery({ onCopy, onError }) {
             await checkAndCaptureClipboard(exportingIndexRef.current);
             closePrivyModalDialog();
           }
-        }, 40);
+        }, 50);
       }
     };
 
@@ -399,16 +416,22 @@ export function BatchRecovery({ onCopy, onError }) {
       } catch (e) {
         console.warn('Logout notice:', e);
       }
-      await new Promise((r) => setTimeout(r, 120));
+      // Wait until authenticatedRef becomes false or timeout
+      const logoutStart = Date.now();
+      while (authenticatedRef.current && Date.now() - logoutStart < 2500) {
+        await new Promise((r) => setTimeout(r, 60));
+      }
     }
 
     try {
-      localStorage.removeItem('privy:token');
-      localStorage.removeItem('privy:refresh_token');
-      localStorage.removeItem('privy:id_token');
-      sessionStorage.removeItem('privy:token');
-      sessionStorage.removeItem('privy:refresh_token');
-      sessionStorage.removeItem('privy:id_token');
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('privy:')) localStorage.removeItem(k);
+      }
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith('privy:')) sessionStorage.removeItem(k);
+      }
     } catch (e) {}
 
     const initRes = await fetch('/privy-auth/api/v1/siws/init', {
@@ -420,6 +443,11 @@ export function BatchRecovery({ onCopy, onError }) {
       credentials: 'omit',
       body: JSON.stringify({ address: targetWallet.phantomAddress }),
     });
+
+    if (!initRes.ok) {
+      const errText = await initRes.text();
+      throw new Error(`SIWS init failed (${initRes.status}): ${errText}`);
+    }
 
     const initData = await initRes.json();
     const nonce = initData?.nonce;
@@ -451,14 +479,25 @@ export function BatchRecovery({ onCopy, onError }) {
         signature: signatureBase64,
       });
     } catch (siwsErr) {
-      if (!siwsErr?.message?.includes('already authenticated')) {
+      if (siwsErr?.message?.includes('already authenticated')) {
+        try {
+          await logoutRef.current();
+          await new Promise((r) => setTimeout(r, 300));
+          await loginWithSiwsRef.current({
+            message,
+            signature: signatureBase64,
+          });
+        } catch (retryErr) {
+          throw retryErr;
+        }
+      } else {
         throw siwsErr;
       }
     }
 
-    // Wait until authenticatedRef becomes true or max 2s
+    // Wait until authenticatedRef becomes true or max 2.5s
     const authStart = Date.now();
-    while (Date.now() - authStart < 2000) {
+    while (Date.now() - authStart < 2500) {
       if (authenticatedRef.current) break;
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -485,7 +524,7 @@ export function BatchRecovery({ onCopy, onError }) {
       const hasModal = !!document.querySelector('div[role="dialog"], button[aria-label="close modal"]');
       if (hasModal) {
         modalSeen = true;
-      } else if (modalSeen && Date.now() - startTime > 1200) {
+      } else if (modalSeen && Date.now() - startTime > 1500) {
         // Modal was manually closed by the user without copying
         return false;
       }
@@ -540,6 +579,13 @@ export function BatchRecovery({ onCopy, onError }) {
     });
   };
 
+  const handleResetCaptured10kKeys = () => {
+    setDiscoveredWallets((prev) => prev.map((w) => ({ ...w, exported10kKey: null })));
+    captured10kKeysRef.current = new Map();
+    lastCapturedKeyRef.current = null;
+    if (onCopy) onCopy('Cleared captured 10K keys. Ready for fresh export!');
+  };
+
   const runBatchExportLoop = async (walletsToExport) => {
     cancelBatchExportRef.current = false;
     setIsBatchExporting(true);
@@ -557,6 +603,11 @@ export function BatchRecovery({ onCopy, onError }) {
 
         if (cancelBatchExportRef.current) break;
 
+        // CRITICAL: Clear clipboard before opening modal so no leftover key from prior wallet can be read!
+        try {
+          await navigator.clipboard.writeText('');
+        } catch (e) {}
+
         // Reset resolver promise for this index
         let resolver;
         const keyCapturePromise = new Promise((resolve) => {
@@ -567,7 +618,7 @@ export function BatchRecovery({ onCopy, onError }) {
         if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key.`);
         openExportModalForWallet(wallet);
 
-        // Wait for key capture (either from writeText hook, click listener, or clipboard read)
+        // Wait for key capture (MUST be a new, unique key!)
         await Promise.race([
           keyCapturePromise,
           waitForClipboardKey(index, 180000),
@@ -576,10 +627,15 @@ export function BatchRecovery({ onCopy, onError }) {
         if (cancelBatchExportRef.current) break;
 
         // Close modal immediately and ensure it is removed from DOM before opening next
-        await ensureModalClosed(400);
+        await ensureModalClosed(500);
 
-        // Instant yield before opening next account modal
-        await new Promise((r) => setTimeout(r, 80));
+        // Clear clipboard again to ensure clean slate for next account
+        try {
+          await navigator.clipboard.writeText('');
+        } catch (e) {}
+
+        // Yield before opening next account modal
+        await new Promise((r) => setTimeout(r, 120));
       } catch (err) {
         console.error(`Export error for ${accLabel}:`, err);
         if (onError) onError(err.message || `Export error for ${accLabel}`);
@@ -598,16 +654,47 @@ export function BatchRecovery({ onCopy, onError }) {
       if (onError) onError('No 10k embedded wallet found for this account.');
       return;
     }
+    // Clear this wallet's key if already present so it gets re-captured cleanly
+    setDiscoveredWallets((prev) => {
+      const next = [...prev];
+      if (next[index]) next[index] = { ...next[index], exported10kKey: null };
+      return next;
+    });
     runBatchExportLoop([{ wallet, index }]);
   };
 
   const handleBatchExportAll = () => {
-    const pending = discoveredWallets
+    // Detect and clear any duplicate keys across wallets
+    const keyCounts = {};
+    discoveredWallets.forEach((w) => {
+      if (w.exported10kKey) {
+        keyCounts[w.exported10kKey] = (keyCounts[w.exported10kKey] || 0) + 1;
+      }
+    });
+
+    const cleanedWallets = discoveredWallets.map((w) => {
+      if (w.exported10kKey && keyCounts[w.exported10kKey] > 1) {
+        return { ...w, exported10kKey: null };
+      }
+      return w;
+    });
+
+    setDiscoveredWallets(cleanedWallets);
+    discoveredWalletsRef.current = cleanedWallets;
+
+    captured10kKeysRef.current = new Map();
+    cleanedWallets.forEach((w, idx) => {
+      if (w.exported10kKey) {
+        captured10kKeysRef.current.set(idx, w.exported10kKey);
+      }
+    });
+
+    const pending = cleanedWallets
       .map((w, idx) => ({ wallet: w, index: idx }))
       .filter(({ wallet }) => !!wallet.embeddedWalletAddress && !wallet.exported10kKey);
 
     if (pending.length === 0) {
-      const hasCaptured = discoveredWallets.some((w) => !!w.exported10kKey);
+      const hasCaptured = cleanedWallets.some((w) => !!w.exported10kKey);
       if (hasCaptured) {
         triggerAutoDownload10kKeys();
       } else {
@@ -937,6 +1024,19 @@ export function BatchRecovery({ onCopy, onError }) {
                     : ''}
                 </span>
               </button>
+
+              {/* Reset 10K Keys */}
+              {discoveredWallets.some((w) => w.exported10kKey) && !isBatchExporting && (
+                <button
+                  type="button"
+                  onClick={handleResetCaptured10kKeys}
+                  className="flex-1 sm:flex-initial px-3.5 py-3.5 rounded-full border border-gray-200 hover:bg-gray-100 text-gray-600 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  title="Clear all captured 10K keys so you can re-capture cleanly"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-gray-500" />
+                  <span>Reset Keys</span>
+                </button>
+              )}
 
               {/* Dedicated Export for Phantom Sub-Account Keys */}
               <button
