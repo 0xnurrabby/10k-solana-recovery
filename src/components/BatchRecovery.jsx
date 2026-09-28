@@ -22,7 +22,10 @@ import {
   Terminal,
   Activity,
   Layers,
-  Key
+  Key,
+  FolderCheck,
+  CheckCircle2,
+  X
 } from 'lucide-react';
 import { scanSubWallets, toBase64, parseRecoveryInput, authenticateSubAccountWithPrivy } from '../utils/scanner';
 
@@ -41,9 +44,11 @@ export function BatchRecovery({ onCopy, onError }) {
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [exportSession, setExportSession] = useState(null);
   const [batchQueue, setBatchQueue] = useState([]);
+  const [exportCompleteModal, setExportCompleteModal] = useState(null);
 
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
+  const lastCapturedKeyRef = useRef(null);
 
   const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
@@ -209,12 +214,21 @@ export function BatchRecovery({ onCopy, onError }) {
 
   const closePrivyModalDialog = () => {
     try {
+      // Privy export modal close button matches button[aria-label="close modal"] or componentId sc-e033e17a-0
       const closeBtn = document.querySelector(
-        'button[data-component-id="sc-9b65f2b6-1"], button[aria-label*="lose"], [class*="CloseButton"], div[role="dialog"] button'
+        'button[aria-label="close modal"], button[data-component-id="sc-e033e17a-0"], button[aria-label*="close" i], button[aria-label*="lose" i], [class*="CloseButton"], button[data-component-id="sc-9b65f2b6-1"]'
       );
       if (closeBtn) {
         closeBtn.click();
         return true;
+      }
+      const dialog = document.querySelector('div[role="dialog"]');
+      if (dialog) {
+        const dialogClose = dialog.querySelector('button[aria-label*="close" i], button:has(svg)');
+        if (dialogClose) {
+          dialogClose.click();
+          return true;
+        }
       }
       window.dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -237,18 +251,33 @@ export function BatchRecovery({ onCopy, onError }) {
         const text = await navigator.clipboard.readText();
         const cleaned = text?.trim();
         if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
+          // If this key is identical to the last captured key, it's leftover in clipboard from prior account
+          if (cleaned === lastCapturedKeyRef.current) {
+            return false;
+          }
+
           let wasCaptured = false;
           setDiscoveredWallets((prev) => {
             const next = [...prev];
+            const alreadyUsedByOther = next.some((w, idx) => idx !== index && w.exported10kKey === cleaned);
+            if (alreadyUsedByOther) {
+              return prev;
+            }
+
             if (next[index] && next[index].exported10kKey !== cleaned) {
               next[index] = { ...next[index], exported10kKey: cleaned };
+              lastCapturedKeyRef.current = cleaned;
               wasCaptured = true;
             }
             return next;
           });
+
           if (wasCaptured) {
-            if (onCopy) onCopy(`Captured 10k private key for Account ${index + 1}!`);
+            if (onCopy) onCopy(`Captured 10k key for Account ${index + 1}! Auto-closing modal...`);
             closePrivyModalDialog();
+            setTimeout(closePrivyModalDialog, 80);
+            setTimeout(closePrivyModalDialog, 200);
+            setTimeout(closePrivyModalDialog, 400);
           }
           return true;
         }
@@ -264,7 +293,7 @@ export function BatchRecovery({ onCopy, onError }) {
     if (exportingIndex === null) return;
     const interval = setInterval(() => {
       checkAndCaptureClipboard(exportingIndex);
-    }, 500);
+    }, 350);
     return () => clearInterval(interval);
   }, [exportingIndex]);
 
@@ -509,6 +538,11 @@ export function BatchRecovery({ onCopy, onError }) {
         a.click();
         URL.revokeObjectURL(url);
         if (onCopy) onCopy(`Export finished! Auto-downloaded ${captured.length} 10K keys (.txt)`);
+        setExportCompleteModal({
+          count: captured.length,
+          fileName: '10k_embedded_private_keys.txt',
+          keys: captured,
+        });
       } else {
         if (onCopy) onCopy('Sequential export completed.');
       }
@@ -1240,6 +1274,117 @@ export function BatchRecovery({ onCopy, onError }) {
                 )}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Export Complete Notification & Keys Modal */}
+      {exportCompleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl max-w-xl w-full border border-gray-200 shadow-2xl p-6 space-y-5 text-left">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-gray-900 text-base">Export Complete!</h3>
+                  <p className="text-xs text-emerald-600 font-medium">
+                    Successfully exported {exportCompleteModal.count} 10K Embedded Private Key(s)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExportCompleteModal(null)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors cursor-pointer"
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200/80 space-y-2 text-xs">
+              <div className="flex items-start gap-2.5 text-blue-900">
+                <FolderCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                <div className="space-y-1.5">
+                  <span className="font-bold text-blue-950 block text-sm">File Saved Successfully</span>
+                  <p className="text-blue-800 text-xs">
+                    The keys have been downloaded directly to your computer:
+                  </p>
+                  <div className="mt-2 font-mono bg-white p-3 rounded-lg border border-blue-200 text-gray-800 text-[11px] break-all select-all space-y-1.5">
+                    <div>
+                      <strong className="text-gray-500 font-sans">File Name: </strong>
+                      <span className="font-bold text-gray-900">{exportCompleteModal.fileName}</span>
+                    </div>
+                    <div>
+                      <strong className="text-gray-500 font-sans">Saved Folder: </strong>
+                      <span className="text-blue-600 font-bold">Downloads</span> (Browser default: <code>C:\Users\&lt;Username&gt;\Downloads</code>)
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-gray-700">Exported 10K Private Keys ({exportCompleteModal.count})</span>
+                <button
+                  type="button"
+                  onClick={() => handleCopyText(exportCompleteModal.keys.join('\n'), 'all_exported_modal', 'All private keys')}
+                  className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
+                >
+                  {copiedKey === 'all_exported_modal' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-emerald-600 font-semibold">Copied All!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy All Keys</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="max-h-48 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50 p-3 font-mono text-[11px] text-gray-800 space-y-1 select-all">
+                {exportCompleteModal.keys.map((key, i) => (
+                  <div key={i} className="flex items-center gap-2 py-0.5 border-b border-gray-100 last:border-none">
+                    <span className="text-gray-400 select-none text-[10px] w-5 text-right">{i + 1}.</span>
+                    <span className="break-all">{key}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const txtContent = exportCompleteModal.keys.join('\n') + '\n';
+                  const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = exportCompleteModal.fileName;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  if (onCopy) onCopy('Re-downloaded 10K private keys text file.');
+                }}
+                className="px-4 py-2.5 rounded-full border border-gray-200 hover:bg-gray-100 text-gray-700 font-medium text-xs inline-flex items-center gap-2 cursor-pointer transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-gray-500" />
+                <span>Download Again (.txt)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setExportCompleteModal(null)}
+                className="px-5 py-2.5 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-xs inline-flex items-center gap-2 cursor-pointer transition-colors shadow-sm"
+              >
+                <span>Done</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
