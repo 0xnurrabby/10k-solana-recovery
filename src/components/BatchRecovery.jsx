@@ -49,6 +49,7 @@ export function BatchRecovery({ onCopy, onError }) {
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
   const lastCapturedKeyRef = useRef(null);
+  const batchQueueRef = useRef([]);
 
   const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
@@ -229,16 +230,17 @@ export function BatchRecovery({ onCopy, onError }) {
           dialogClose.click();
           return true;
         }
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            code: 'Escape',
+            keyCode: 27,
+            which: 27,
+            bubbles: true,
+          })
+        );
+        return true;
       }
-      window.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Escape',
-          code: 'Escape',
-          keyCode: 27,
-          which: 27,
-          bubbles: true,
-        })
-      );
     } catch (e) {
       console.warn('Auto close dialog notice:', e);
     }
@@ -273,11 +275,10 @@ export function BatchRecovery({ onCopy, onError }) {
           });
 
           if (wasCaptured) {
-            if (onCopy) onCopy(`Captured 10k key for Account ${index + 1}! Auto-closing modal...`);
-            closePrivyModalDialog();
-            setTimeout(closePrivyModalDialog, 80);
-            setTimeout(closePrivyModalDialog, 200);
-            setTimeout(closePrivyModalDialog, 400);
+            if (onCopy) onCopy(`Captured 10k key for Account ${index + 1}! Next wallet loading...`);
+            setTimeout(() => {
+              closePrivyModalDialog();
+            }, 120);
           }
           return true;
         }
@@ -316,15 +317,25 @@ export function BatchRecovery({ onCopy, onError }) {
       setExportSession((prev) => (prev ? { ...prev, stage: 'logging_out' } : null));
       (async () => {
         try {
+          try {
+            localStorage.removeItem('privy:token');
+            localStorage.removeItem('privy:refresh_token');
+            localStorage.removeItem('privy:id_token');
+            sessionStorage.removeItem('privy:token');
+            sessionStorage.removeItem('privy:refresh_token');
+            sessionStorage.removeItem('privy:id_token');
+          } catch (e) {}
           await logout();
         } catch (e) {
           console.warn('Logout notice:', e);
+        } finally {
+          setExportSession((prev) => (prev && prev.stage === 'logging_out' ? { ...prev, stage: 'logging_in' } : prev));
         }
       })();
     } else {
       setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
     }
-  }, [exportSession, authenticated, user, logout]);
+  }, [exportSession?.stage]);
 
   // Stage 2: Wait for logout to finish before starting fresh login
   useEffect(() => {
@@ -332,8 +343,14 @@ export function BatchRecovery({ onCopy, onError }) {
 
     if (!authenticated) {
       setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
+      return;
     }
-  }, [exportSession, authenticated]);
+
+    const timer = setTimeout(() => {
+      setExportSession((prev) => (prev && prev.stage === 'logging_out' ? { ...prev, stage: 'logging_in' } : prev));
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [exportSession?.stage, authenticated]);
 
   // Stage 3: Perform SIWS authentication for target wallet
   useEffect(() => {
@@ -438,13 +455,11 @@ export function BatchRecovery({ onCopy, onError }) {
       setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
     } else {
       const fallbackTimer = setTimeout(() => {
-        if (authenticated) {
-          setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
-        }
-      }, 3000);
+        setExportSession((prev) => (prev && prev.stage === 'waiting_for_auth' ? { ...prev, stage: 'open_modal' } : prev));
+      }, 700);
       return () => clearTimeout(fallbackTimer);
     }
-  }, [exportSession, authenticated, user]);
+  }, [exportSession?.stage, authenticated, user]);
 
   // Stage 5: Open Privy export modal with guaranteed fresh authenticated closure
   useEffect(() => {
@@ -498,31 +513,32 @@ export function BatchRecovery({ onCopy, onError }) {
     if (!proceedWithBatch || cancelBatchExportRef.current) {
       setIsBatchExporting(false);
       setBatchQueue([]);
+      batchQueueRef.current = [];
       return;
     }
 
-    setBatchQueue((prevQueue) => {
-      if (prevQueue.length > 0) {
-        const nextItem = prevQueue[0];
-        const remaining = prevQueue.slice(1);
-        setTimeout(() => {
-          setExportingIndex(nextItem.index);
-          setExportSession({
-            wallet: nextItem.wallet,
-            index: nextItem.index,
-            isBatch: true,
-            stage: 'init',
-          });
-        }, 350);
-        return remaining;
-      } else {
-        setIsBatchExporting(false);
-        setTimeout(() => {
-          triggerAutoDownload10kKeys();
-        }, 500);
-        return [];
-      }
-    });
+    if (batchQueueRef.current && batchQueueRef.current.length > 0) {
+      const nextItem = batchQueueRef.current[0];
+      batchQueueRef.current = batchQueueRef.current.slice(1);
+      setBatchQueue(batchQueueRef.current);
+
+      setTimeout(() => {
+        if (cancelBatchExportRef.current) return;
+        setExportingIndex(nextItem.index);
+        setExportSession({
+          wallet: nextItem.wallet,
+          index: nextItem.index,
+          isBatch: true,
+          stage: 'init',
+        });
+      }, 500);
+    } else {
+      setIsBatchExporting(false);
+      setBatchQueue([]);
+      setTimeout(() => {
+        triggerAutoDownload10kKeys();
+      }, 500);
+    }
   };
 
   const triggerAutoDownload10kKeys = () => {
@@ -585,6 +601,7 @@ export function BatchRecovery({ onCopy, onError }) {
 
     cancelBatchExportRef.current = false;
     setIsBatchExporting(true);
+    batchQueueRef.current = pending.slice(1);
     setBatchQueue(pending.slice(1));
     setExportingIndex(pending[0].index);
     setExportSession({
@@ -599,6 +616,7 @@ export function BatchRecovery({ onCopy, onError }) {
   const handleStopBatchExport = () => {
     cancelBatchExportRef.current = true;
     setIsBatchExporting(false);
+    batchQueueRef.current = [];
     setBatchQueue([]);
     setExportSession(null);
     setExportingIndex(null);
