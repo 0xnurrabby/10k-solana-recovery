@@ -43,18 +43,11 @@ export function BatchRecovery({ onCopy, onError }) {
   const [visiblePrivateKeys, setVisiblePrivateKeys] = useState({});
   const [showAllPrivateKeys, setShowAllPrivateKeys] = useState(false);
   const [isBatchExporting, setIsBatchExporting] = useState(false);
-  const [exportSession, setExportSession] = useState(null);
-  const [batchQueue, setBatchQueue] = useState([]);
   const [exportCompleteModal, setExportCompleteModal] = useState(null);
-  const [exportIntervalSeconds, setExportIntervalSeconds] = useState(10);
-  const [countdownRemaining, setCountdownRemaining] = useState(null);
 
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
   const lastCapturedKeyRef = useRef(null);
-  const batchQueueRef = useRef([]);
-  const intervalSecondsRef = useRef(10);
-  const countdownTimerRef = useRef(null);
 
   const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
@@ -65,6 +58,15 @@ export function BatchRecovery({ onCopy, onError }) {
   exportWalletRef.current = exportWalletFromHook;
   const solanaWalletsRef = useRef(solanaWalletsHook);
   solanaWalletsRef.current = solanaWalletsHook;
+
+  const authenticatedRef = useRef(authenticated);
+  authenticatedRef.current = authenticated;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const logoutRef = useRef(logout);
+  logoutRef.current = logout;
+  const loginWithSiwsRef = useRef(loginWithSiws);
+  loginWithSiwsRef.current = loginWithSiws;
 
   const detected = parseRecoveryInput(mnemonic);
   const detectedPhrases = detected.phrases;
@@ -303,275 +305,97 @@ export function BatchRecovery({ onCopy, onError }) {
     return () => clearInterval(interval);
   }, [exportingIndex]);
 
-  // State Machine for Privy Session & Modal Export
-  // Stage 1: Initialize export session and verify current authentication
-  useEffect(() => {
-    if (!exportSession || exportSession.stage !== 'init') return;
+  // Seamless Linear Async Flow for Instant Privy Export
+  const switchPrivyAccount = async (targetWallet) => {
+    const targetAddr = targetWallet.phantomAddress?.toLowerCase();
 
-    const { wallet } = exportSession;
     const isTargetAlreadyAuthenticated =
-      authenticated &&
-      (user?.linkedAccounts?.some(
-        (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
-      ) ||
-        user?.wallet?.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase());
+      authenticatedRef.current &&
+      (userRef.current?.linkedAccounts?.some((acc) => acc.address?.toLowerCase() === targetAddr) ||
+        userRef.current?.wallet?.address?.toLowerCase() === targetAddr);
 
     if (isTargetAlreadyAuthenticated) {
-      setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
-    } else if (authenticated) {
-      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_out' } : null));
-      (async () => {
-        try {
-          try {
-            localStorage.removeItem('privy:token');
-            localStorage.removeItem('privy:refresh_token');
-            localStorage.removeItem('privy:id_token');
-            sessionStorage.removeItem('privy:token');
-            sessionStorage.removeItem('privy:refresh_token');
-            sessionStorage.removeItem('privy:id_token');
-          } catch (e) {}
-          await logout();
-        } catch (e) {
-          console.warn('Logout notice:', e);
-        } finally {
-          setExportSession((prev) => (prev && prev.stage === 'logging_out' ? { ...prev, stage: 'logging_in' } : prev));
-        }
-      })();
-    } else {
-      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
-    }
-  }, [exportSession?.stage]);
-
-  // Stage 2: Wait for logout to finish before starting fresh login
-  useEffect(() => {
-    if (!exportSession || exportSession.stage !== 'logging_out') return;
-
-    if (!authenticated) {
-      setExportSession((prev) => (prev ? { ...prev, stage: 'logging_in' } : null));
-      return;
+      return true;
     }
 
-    const timer = setTimeout(() => {
-      setExportSession((prev) => (prev && prev.stage === 'logging_out' ? { ...prev, stage: 'logging_in' } : prev));
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [exportSession?.stage, authenticated]);
-
-  // Stage 3: Perform SIWS authentication for target wallet
-  useEffect(() => {
-    if (!exportSession || exportSession.stage !== 'logging_in') return;
-
-    let isCancelled = false;
-    const { wallet, index } = exportSession;
-    const accLabel = wallet.label || `Account ${wallet.accountIndex || index + 1}`;
-
-    const performLogin = async () => {
+    if (authenticatedRef.current) {
       try {
-        if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
-
-        try {
-          localStorage.removeItem('privy:token');
-          localStorage.removeItem('privy:refresh_token');
-          localStorage.removeItem('privy:id_token');
-          sessionStorage.removeItem('privy:token');
-          sessionStorage.removeItem('privy:refresh_token');
-          sessionStorage.removeItem('privy:id_token');
-        } catch (e) {}
-
-        const initRes = await fetch('/privy-auth/api/v1/siws/init', {
-          method: 'POST',
-          headers: {
-            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-            'content-type': 'application/json',
-          },
-          credentials: 'omit',
-          body: JSON.stringify({ address: wallet.phantomAddress }),
-        });
-
-        const initData = await initRes.json();
-        const nonce = initData?.nonce;
-        if (!nonce) throw new Error('Failed to retrieve authentication nonce from Privy');
-
-        const issuedAt = new Date().toISOString();
-        const message = [
-          '10k.world wants you to sign in with your Solana account:',
-          wallet.phantomAddress,
-          '',
-          `You are proving you own ${wallet.phantomAddress}.`,
-          '',
-          'URI: https://10k.world',
-          'Version: 1',
-          'Chain ID: mainnet',
-          `Nonce: ${nonce}`,
-          `Issued At: ${issuedAt}`,
-          'Resources:',
-          '- https://privy.io',
-        ].join('\n');
-
-        const msgBytes = new TextEncoder().encode(message);
-        const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
-        const signatureBase64 = toBase64(sig);
-
-        if (isCancelled) return;
-
-        try {
-          await loginWithSiws({
-            message,
-            signature: signatureBase64,
-          });
-        } catch (siwsErr) {
-          if (!siwsErr?.message?.includes('already authenticated')) {
-            throw siwsErr;
-          }
-        }
-
-        if (!isCancelled) {
-          setExportSession((prev) => (prev ? { ...prev, stage: 'waiting_for_auth' } : null));
-        }
-      } catch (err) {
-        console.error(`Login error for ${accLabel}:`, err);
-        if (!isCancelled) {
-          if (onError) onError(err.message || `Authentication failed for ${accLabel}`);
-          handleFinishSession(false);
-        }
+        await logoutRef.current();
+      } catch (e) {
+        console.warn('Logout notice:', e);
       }
-    };
-
-    performLogin();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [exportSession?.stage]);
-
-  // Stage 4: Wait for React render tree to update with authenticated user
-  useEffect(() => {
-    if (!exportSession || exportSession.stage !== 'waiting_for_auth') return;
-
-    const { wallet } = exportSession;
-    const isNowTargetAuthenticated =
-      authenticated &&
-      (user?.linkedAccounts?.some(
-        (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
-      ) ||
-        user?.wallet?.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase());
-
-    if (isNowTargetAuthenticated) {
-      setExportSession((prev) => (prev ? { ...prev, stage: 'open_modal' } : null));
-    } else {
-      const fallbackTimer = setTimeout(() => {
-        setExportSession((prev) => (prev && prev.stage === 'waiting_for_auth' ? { ...prev, stage: 'open_modal' } : prev));
-      }, 700);
-      return () => clearTimeout(fallbackTimer);
+      await new Promise((r) => setTimeout(r, 150));
     }
-  }, [exportSession?.stage, authenticated, user]);
 
-  // Stage 5: Open Privy export modal with guaranteed fresh authenticated closure
-  useEffect(() => {
-    if (!exportSession || exportSession.stage !== 'open_modal') return;
+    try {
+      localStorage.removeItem('privy:token');
+      localStorage.removeItem('privy:refresh_token');
+      localStorage.removeItem('privy:id_token');
+      sessionStorage.removeItem('privy:token');
+      sessionStorage.removeItem('privy:refresh_token');
+      sessionStorage.removeItem('privy:id_token');
+    } catch (e) {}
 
-    let isSubscribed = true;
-    const { wallet, index } = exportSession;
-    const accLabel = wallet.label || `Account ${wallet.accountIndex || index + 1}`;
+    const initRes = await fetch('/privy-auth/api/v1/siws/init', {
+      method: 'POST',
+      headers: {
+        'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+        'content-type': 'application/json',
+      },
+      credentials: 'omit',
+      body: JSON.stringify({ address: targetWallet.phantomAddress }),
+    });
 
-    const triggerModal = async () => {
-      try {
-        if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key inside modal.`);
-        await new Promise((r) => setTimeout(r, 250));
+    const initData = await initRes.json();
+    const nonce = initData?.nonce;
+    if (!nonce) throw new Error('Failed to retrieve authentication nonce from Privy');
 
-        const exportFn = exportWalletRef.current || exportWalletFromHook;
-        const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
+    const issuedAt = new Date().toISOString();
+    const message = [
+      '10k.world wants you to sign in with your Solana account:',
+      targetWallet.phantomAddress,
+      '',
+      `You are proving you own ${targetWallet.phantomAddress}.`,
+      '',
+      'URI: https://10k.world',
+      'Version: 1',
+      'Chain ID: mainnet',
+      `Nonce: ${nonce}`,
+      `Issued At: ${issuedAt}`,
+      'Resources:',
+      '- https://privy.io',
+    ].join('\n');
 
-        if (typeof exportFn === 'function') {
-          await exportFn({ address: wallet.embeddedWalletAddress });
-        } else if (typeof solanaHook?.exportWallet === 'function') {
-          await solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
-        } else {
-          throw new Error('Privy export wallet function is not available.');
-        }
+    const msgBytes = new TextEncoder().encode(message);
+    const sig = nacl.sign.detached(msgBytes, targetWallet.keypair.secretKey);
+    const signatureBase64 = toBase64(sig);
 
-        await checkAndCaptureClipboard(index);
-      } catch (err) {
-        console.warn('Export modal closed or error:', err);
-        await checkAndCaptureClipboard(index);
-        if (!err?.message?.includes('exited') && !err?.message?.includes('cancelled')) {
-          if (onError) onError(err.message || 'Export modal error');
-        }
-      } finally {
-        if (isSubscribed) {
-          handleFinishSession(true);
-        }
+    try {
+      await loginWithSiwsRef.current({
+        message,
+        signature: signatureBase64,
+      });
+    } catch (siwsErr) {
+      if (!siwsErr?.message?.includes('already authenticated')) {
+        throw siwsErr;
       }
-    };
-
-    triggerModal();
-
-    return () => {
-      isSubscribed = false;
-    };
-  }, [exportSession?.stage]);
-
-  const handleFinishSession = (proceedWithBatch = true) => {
-    setExportSession(null);
-    setExportingIndex(null);
-    if (countdownTimerRef.current) {
-      clearInterval(countdownTimerRef.current);
-      countdownTimerRef.current = null;
-    }
-    setCountdownRemaining(null);
-
-    if (!proceedWithBatch || cancelBatchExportRef.current) {
-      setIsBatchExporting(false);
-      setBatchQueue([]);
-      batchQueueRef.current = [];
-      return;
     }
 
-    if (batchQueueRef.current && batchQueueRef.current.length > 0) {
-      const nextItem = batchQueueRef.current[0];
-      batchQueueRef.current = batchQueueRef.current.slice(1);
-      setBatchQueue(batchQueueRef.current);
+    await new Promise((r) => setTimeout(r, 200));
+    return true;
+  };
 
-      const delaySeconds = Math.max(1, intervalSecondsRef.current || 10);
-      let remaining = delaySeconds;
-      setCountdownRemaining(remaining);
-
-      countdownTimerRef.current = setInterval(() => {
-        if (cancelBatchExportRef.current) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-          setCountdownRemaining(null);
-          setIsBatchExporting(false);
-          return;
-        }
-
-        remaining -= 1;
-        setCountdownRemaining(remaining);
-
-        if (remaining <= 0) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-          setCountdownRemaining(null);
-
-          if (!cancelBatchExportRef.current) {
-            setExportingIndex(nextItem.index);
-            setExportSession({
-              wallet: nextItem.wallet,
-              index: nextItem.index,
-              isBatch: true,
-              stage: 'init',
-            });
-          }
-        }
-      }, 1000);
-    } else {
-      setIsBatchExporting(false);
-      setBatchQueue([]);
-      setCountdownRemaining(null);
-      setTimeout(() => {
-        triggerAutoDownload10kKeys();
-      }, 500);
+  const waitForClipboardKey = async (walletIndex, timeoutMs = 180000) => {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      if (cancelBatchExportRef.current) return false;
+      const captured = await checkAndCaptureClipboard(walletIndex);
+      if (captured) {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 150));
     }
+    return false;
   };
 
   const triggerAutoDownload10kKeys = () => {
@@ -599,22 +423,62 @@ export function BatchRecovery({ onCopy, onError }) {
     });
   };
 
+  const runBatchExportLoop = async (walletsToExport) => {
+    cancelBatchExportRef.current = false;
+    setIsBatchExporting(true);
+
+    for (let i = 0; i < walletsToExport.length; i++) {
+      if (cancelBatchExportRef.current) break;
+
+      const { wallet, index } = walletsToExport[i];
+      const accLabel = wallet.label || `Account ${wallet.accountIndex || index + 1}`;
+      setExportingIndex(index);
+
+      try {
+        if (onCopy) onCopy(`Authenticating ${accLabel} with 10k Privy...`);
+        await switchPrivyAccount(wallet);
+
+        if (cancelBatchExportRef.current) break;
+
+        if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key.`);
+        const exportFn = exportWalletRef.current || exportWalletFromHook;
+        const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
+
+        let modalPromise;
+        if (typeof exportFn === 'function') {
+          modalPromise = exportFn({ address: wallet.embeddedWalletAddress });
+        } else if (typeof solanaHook?.exportWallet === 'function') {
+          modalPromise = solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
+        } else {
+          throw new Error('Privy export wallet function is not available.');
+        }
+
+        await waitForClipboardKey(index);
+
+        closePrivyModalDialog();
+        try {
+          await modalPromise;
+        } catch (e) {}
+
+        // Instant transition to next wallet
+        await new Promise((r) => setTimeout(r, 100));
+      } catch (err) {
+        console.error(`Export error for ${accLabel}:`, err);
+        if (onError) onError(err.message || `Export error for ${accLabel}`);
+      }
+    }
+
+    setIsBatchExporting(false);
+    setExportingIndex(null);
+    triggerAutoDownload10kKeys();
+  };
+
   const handleExportWallet = (wallet, index) => {
     if (!wallet.embeddedWalletAddress) {
       if (onError) onError('No 10k embedded wallet found for this account.');
       return;
     }
-
-    cancelBatchExportRef.current = true;
-    setIsBatchExporting(false);
-    setBatchQueue([]);
-    setExportingIndex(index);
-    setExportSession({
-      wallet,
-      index,
-      isBatch: false,
-      stage: 'init',
-    });
+    runBatchExportLoop([{ wallet, index }]);
   };
 
   const handleBatchExportAll = () => {
@@ -632,33 +496,15 @@ export function BatchRecovery({ onCopy, onError }) {
       return;
     }
 
-    cancelBatchExportRef.current = false;
-    setIsBatchExporting(true);
-    batchQueueRef.current = pending.slice(1);
-    setBatchQueue(pending.slice(1));
-    setExportingIndex(pending[0].index);
-    setExportSession({
-      wallet: pending[0].wallet,
-      index: pending[0].index,
-      isBatch: true,
-      stage: 'init',
-    });
-    if (onCopy) onCopy(`Starting sequential export for ${pending.length} 10K wallet(s)...`);
+    runBatchExportLoop(pending);
   };
 
   const handleStopBatchExport = () => {
     cancelBatchExportRef.current = true;
     setIsBatchExporting(false);
-    if (countdownTimerRef.current) {
-      clearInterval(countdownTimerRef.current);
-      countdownTimerRef.current = null;
-    }
-    setCountdownRemaining(null);
-    batchQueueRef.current = [];
-    setBatchQueue([]);
-    setExportSession(null);
     setExportingIndex(null);
-    if (onCopy) onCopy('Stopped sequential export');
+    closePrivyModalDialog();
+    if (onCopy) onCopy('Stopped auto export.');
   };
 
   const handlePasteKey = async (index) => {
@@ -991,47 +837,20 @@ export function BatchRecovery({ onCopy, onError }) {
                 <Download className="w-3.5 h-3.5" />
                 <span>Export JSON ({discoveredWallets.length})</span>
               </button>
-              {/* Export Interval / Auto-Click Timer Selector */}
-              <div className="flex items-center gap-1.5 px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-xs">
-                <Clock className="w-3.5 h-3.5 text-gray-500" />
-                <span className="text-gray-600 font-medium whitespace-nowrap">Interval:</span>
-                <select
-                  disabled={isBatchExporting}
-                  value={exportIntervalSeconds}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    setExportIntervalSeconds(val);
-                    intervalSecondsRef.current = val;
-                  }}
-                  className="bg-transparent font-semibold text-gray-900 cursor-pointer focus:outline-hidden text-xs py-0.5"
-                  title="Delay between wallets for Auto Clicker synchronization"
-                >
-                  <option value={10}>10s (Auto-Clicker Recommended)</option>
-                  <option value={5}>5s (Fast)</option>
-                  <option value={8}>8s (Balanced)</option>
-                  <option value={15}>15s (Relaxed)</option>
-                </select>
-              </div>
             </div>
           )}
         </div>
 
-        {/* Active Batch Export Guidance Banner with Live Countdown */}
+        {/* Active Batch Export Guidance Banner */}
         {isBatchExporting && (
           <div className="p-4 rounded-2xl bg-amber-50/90 border border-amber-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 font-sans shadow-xs">
             <div className="flex items-center gap-2.5">
               <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
               <span>
-                <strong>10K Privy Secure Export Active:</strong> Set your Auto-Clicker on <strong>&quot;Copy key&quot;</strong>. The next wallet will open cleanly every <strong>{exportIntervalSeconds}s</strong>.
+                <strong>10K Privy Secure Export Active:</strong> Click <strong>&quot;Copy key&quot;</strong> in each modal or use your auto-clicker. Next wallet will appear instantly!
               </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {countdownRemaining !== null && countdownRemaining > 0 && (
-                <span className="px-3 py-1 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-mono font-bold text-xs inline-flex items-center gap-1.5 animate-pulse">
-                  <Clock className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Next wallet in: {countdownRemaining}s</span>
-                </span>
-              )}
               <span className="px-2.5 py-1 rounded-full bg-amber-200/80 font-mono font-bold text-amber-950 text-[11px]">
                 {discoveredWallets.filter((w) => w.exported10kKey).length}/{discoveredWallets.filter((w) => w.embeddedWalletAddress).length} Captured
               </span>
