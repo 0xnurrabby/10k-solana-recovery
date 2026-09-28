@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useLoginWithSiws } from '@privy-io/react-auth';
 import { useSolanaWallets, useExportWallet } from '@privy-io/react-auth/solana';
+import nacl from 'tweetnacl';
 import { 
   KeyRound, 
   Search, 
@@ -15,19 +16,25 @@ import {
   Eye, 
   EyeOff, 
   Download,
-  Sparkles
+  Sparkles,
+  Square,
+  Terminal,
+  Activity
 } from 'lucide-react';
-import { scanSubWallets } from '../utils/scanner';
+import { scanSubWallets, toBase64 } from '../utils/scanner';
 
 export function BatchRecovery({ onCopy, onError }) {
   const [mnemonic, setMnemonic] = useState('');
   const [showMnemonic, setShowMnemonic] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(null);
+  const [scanLogs, setScanLogs] = useState([]);
   const [discoveredWallets, setDiscoveredWallets] = useState([]);
   const [exportingIndex, setExportingIndex] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [visiblePrivateKeys, setVisiblePrivateKeys] = useState({});
+
+  const cancelSignalRef = useRef({ isCancelled: false });
 
   const { loginWithSiws } = useLoginWithSiws();
   const solanaWalletsHook = useSolanaWallets();
@@ -52,6 +59,11 @@ export function BatchRecovery({ onCopy, onError }) {
     }));
   };
 
+  const handleStopScan = () => {
+    cancelSignalRef.current.isCancelled = true;
+    if (onCopy) onCopy('Stopping scan after current account...');
+  };
+
   const handleStartScan = async () => {
     const clean = mnemonic.trim();
     const words = clean.split(/\s+/).filter(Boolean);
@@ -60,8 +72,10 @@ export function BatchRecovery({ onCopy, onError }) {
       return;
     }
 
+    cancelSignalRef.current = { isCancelled: false };
     setIsScanning(true);
     setDiscoveredWallets([]);
+    setScanLogs([]);
     setScanProgress({
       message: 'Initializing derivation and scanning on-chain activity...',
       accountIndex: 0,
@@ -71,6 +85,7 @@ export function BatchRecovery({ onCopy, onError }) {
     try {
       const results = await scanSubWallets({
         mnemonic: clean,
+        cancelSignal: cancelSignalRef.current,
         onProgress: (p) => {
           if (p.status === 'scanning') {
             setScanProgress({
@@ -78,16 +93,47 @@ export function BatchRecovery({ onCopy, onError }) {
               accountIndex: p.accountIndex,
               consecutiveEmpty: p.consecutiveEmpty,
             });
+          } else if (p.status === 'empty') {
+            setScanProgress({
+              message: `Account ${p.accountIndex}: No transactions found (Empty streak ${p.consecutiveEmpty}/10)`,
+              accountIndex: p.accountIndex,
+              consecutiveEmpty: p.consecutiveEmpty,
+            });
+            setScanLogs((prev) => [
+              ...prev.slice(-19),
+              {
+                id: Math.random().toString(),
+                type: 'empty',
+                text: `Account ${p.accountIndex} (${p.phantomAddress.slice(0, 4)}...${p.phantomAddress.slice(-4)}): 0 txns (empty ${p.consecutiveEmpty}/10)`,
+              },
+            ]);
           } else if (p.status === 'authenticating') {
             setScanProgress((prev) => ({
               ...prev,
-              message: `Found activity on Account ${p.accountIndex}! Authenticating with Privy...`,
+              message: `Found activity on Account ${p.accountIndex}! Linking with Privy...`,
             }));
           } else if (p.status === 'found') {
             setDiscoveredWallets((prev) => {
               const exists = prev.some((w) => w.accountIndex === p.wallet.accountIndex);
               return exists ? prev : [...prev, p.wallet];
             });
+            setScanLogs((prev) => [
+              ...prev.slice(-19),
+              {
+                id: Math.random().toString(),
+                type: 'found',
+                text: `Account ${p.wallet.accountIndex} (${p.wallet.phantomAddress.slice(0, 4)}...${p.wallet.phantomAddress.slice(-4)}): Found ${p.wallet.txCount} txns! Linked 10k: ${p.wallet.embeddedWalletAddress ? p.wallet.embeddedWalletAddress.slice(0, 4) + '...' + p.wallet.embeddedWalletAddress.slice(-4) : 'None'}`,
+              },
+            ]);
+          } else if (p.status === 'retrying') {
+            setScanLogs((prev) => [
+              ...prev.slice(-19),
+              {
+                id: Math.random().toString(),
+                type: 'retry',
+                text: `Account ${p.accountIndex}: Rate limit encountered, retrying attempt ${p.attempt}/3...`,
+              },
+            ]);
           }
         },
       });
@@ -115,20 +161,52 @@ export function BatchRecovery({ onCopy, onError }) {
 
     try {
       setExportingIndex(index);
-      if (onCopy) onCopy(`Activating Privy session for Account ${wallet.accountIndex}...`);
+      if (onCopy) onCopy(`Authenticating session for Account ${wallet.accountIndex}...`);
 
-      // 1. Activate Privy session for this sub-account
-      if (wallet.privyMessage && wallet.privySignature) {
-        await loginWithSiws({
-          message: wallet.privyMessage,
-          signature: wallet.privySignature,
-        });
+      // 1. Fetch a fresh SIWS nonce for this specific sub-account
+      const initRes = await fetch('/privy-auth/api/v1/siws/init', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ address: wallet.phantomAddress }),
+      });
+
+      const initData = await initRes.json();
+      const nonce = initData?.nonce;
+      if (!nonce) {
+        throw new Error('Failed to retrieve fresh authentication nonce from Privy');
       }
 
-      // Safety timer: unlock button after 4s if modal stays pending
-      const timer = setTimeout(() => {
-        setExportingIndex(null);
-      }, 4000);
+      const issuedAt = new Date().toISOString();
+      const message = [
+        `10k.world wants you to sign in with your Solana account:`,
+        wallet.phantomAddress,
+        '',
+        `You are proving you own ${wallet.phantomAddress}.`,
+        '',
+        `URI: https://10k.world`,
+        `Version: 1`,
+        `Chain ID: mainnet`,
+        `Nonce: ${nonce}`,
+        `Issued At: ${issuedAt}`,
+        `Resources:`,
+        `- https://privy.io`,
+      ].join('\n');
+
+      const msgBytes = new TextEncoder().encode(message);
+      const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
+      const signatureBase64 = toBase64(sig);
+
+      // Sign into Privy React SDK session
+      await loginWithSiws({
+        message,
+        signature: signatureBase64,
+      });
+
+      if (onCopy) onCopy(`Opening export modal for Account ${wallet.accountIndex}...`);
+      await new Promise((r) => setTimeout(r, 600));
 
       // 2. Open Privy export modal for this embedded wallet
       if (typeof exportWalletFromHook === 'function') {
@@ -136,8 +214,6 @@ export function BatchRecovery({ onCopy, onError }) {
       } else if (typeof solanaWalletsHook?.exportWallet === 'function') {
         await solanaWalletsHook.exportWallet({ address: wallet.embeddedWalletAddress });
       }
-
-      clearTimeout(timer);
     } catch (err) {
       console.warn('Export error or dialog closed:', err);
       if (!err?.message?.includes('exited') && !err?.message?.includes('cancelled')) {
@@ -222,26 +298,38 @@ export function BatchRecovery({ onCopy, onError }) {
           </div>
         </div>
 
-        {/* Scan Button */}
+        {/* Scan Actions */}
         <div className="flex flex-col sm:flex-row items-center gap-3 pt-1">
-          <button
-            type="button"
-            disabled={isScanning || !mnemonic.trim()}
-            onClick={handleStartScan}
-            className="w-full sm:w-auto px-6 py-3.5 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-50 active:scale-[0.99]"
-          >
-            {isScanning ? (
-              <>
+          {isScanning ? (
+            <>
+              <button
+                type="button"
+                disabled
+                className="w-full sm:w-auto px-6 py-3.5 rounded-full bg-black text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm opacity-90 cursor-wait"
+              >
                 <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                <span>Scanning Sub-Accounts...</span>
-              </>
-            ) : (
-              <>
-                <Search className="w-4 h-4 text-white" />
-                <span>Scan & Recover Sub-Wallets</span>
-              </>
-            )}
-          </button>
+                <span>Scanning Accounts...</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleStopScan}
+                className="w-full sm:w-auto px-5 py-3.5 rounded-full bg-red-50 hover:bg-red-100 text-red-700 font-medium text-xs inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-red-200"
+              >
+                <Square className="w-3.5 h-3.5 fill-current" />
+                <span>Stop Scan</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={!mnemonic.trim()}
+              onClick={handleStartScan}
+              className="w-full sm:w-auto px-6 py-3.5 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-50 active:scale-[0.99]"
+            >
+              <Search className="w-4 h-4 text-white" />
+              <span>Scan & Recover Sub-Wallets</span>
+            </button>
+          )}
 
           {discoveredWallets.length > 0 && !isScanning && (
             <button
@@ -250,24 +338,58 @@ export function BatchRecovery({ onCopy, onError }) {
               className="w-full sm:w-auto px-4 py-3.5 rounded-full border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export Report (JSON)</span>
+              <span>Export All to JSON ({discoveredWallets.length})</span>
             </button>
           )}
         </div>
 
-        {/* Live Scan Progress */}
+        {/* Live Scan Status & Activity */}
         {isScanning && scanProgress && (
-          <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 space-y-2 animate-pulse">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-gray-700 font-medium">{scanProgress.message}</span>
-              <span className="text-gray-500">Empty: {scanProgress.consecutiveEmpty}/10</span>
+          <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 space-y-3">
+            <div className="grid grid-cols-3 gap-2">
+              <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Scanned</div>
+                <div className="text-base font-bold font-mono text-gray-900">{scanProgress.accountIndex}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Found Active</div>
+                <div className="text-base font-bold font-mono text-emerald-600">{discoveredWallets.length}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Empty Streak</div>
+                <div className="text-base font-bold font-mono text-gray-700">{scanProgress.consecutiveEmpty} / 10</div>
+              </div>
             </div>
-            <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden">
-              <div
-                className="bg-black h-full transition-all duration-300"
-                style={{ width: `${Math.min(100, (scanProgress.accountIndex / 20) * 100)}%` }}
-              />
+
+            <div className="flex items-center justify-between text-xs font-mono text-gray-600 px-0.5">
+              <span className="truncate pr-2">{scanProgress.message}</span>
+              <span className="text-[11px] text-gray-400 shrink-0">Stops at 10 consecutive empty</span>
             </div>
+
+            {/* Live Terminal Log Stream */}
+            {scanLogs.length > 0 && (
+              <div className="p-3 rounded-xl bg-gray-900 text-gray-200 font-mono text-[11px] space-y-1.5 max-h-36 overflow-y-auto">
+                <div className="flex items-center gap-1.5 text-gray-400 text-[10px] border-b border-gray-800 pb-1">
+                  <Terminal className="w-3 h-3 text-emerald-400" />
+                  <span>LIVE SCAN LOG</span>
+                </div>
+                {scanLogs.map((log) => (
+                  <div
+                    key={log.id}
+                    className={`leading-relaxed ${
+                      log.type === 'found'
+                        ? 'text-emerald-400 font-semibold'
+                        : log.type === 'retry'
+                        ? 'text-amber-400'
+                        : 'text-gray-400'
+                    }`}
+                  >
+                    {log.type === 'found' ? '✓ ' : log.type === 'retry' ? '! ' : '· '}
+                    {log.text}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

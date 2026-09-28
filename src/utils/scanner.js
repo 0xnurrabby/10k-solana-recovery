@@ -129,8 +129,9 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
 export async function scanSubWallets({
   mnemonic,
   onProgress,
-  rpcUrl = 'https://api.mainnet-beta.solana.com',
+  rpcUrl = typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : 'https://api.mainnet-beta.solana.com',
   gapLimit = 10,
+  cancelSignal = null,
 }) {
   const cleanMnemonic = mnemonic.trim();
   const seed = Buffer.from(bip39.mnemonicToSeedSync(cleanMnemonic));
@@ -141,6 +142,10 @@ export async function scanSubWallets({
   let accountIndex = 0;
 
   while (consecutiveEmpty < gapLimit) {
+    if (cancelSignal && cancelSignal.isCancelled) {
+      break;
+    }
+
     const derived = deriveAccountFromSeed(seed, accountIndex);
     const { phantomAddress, keypair, path } = derived;
 
@@ -156,26 +161,61 @@ export async function scanSubWallets({
     }
 
     let signatures = [];
-    try {
-      signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
-    } catch (err) {
-      // Retry once on rate limit
-      await new Promise((r) => setTimeout(r, 1200));
+    let fetchSuccess = false;
+    let attempts = 0;
+
+    while (!fetchSuccess && attempts < 3) {
+      try {
+        attempts++;
+        signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+        fetchSuccess = true;
+      } catch (err) {
+        console.warn(`RPC attempt ${attempts} failed for Account ${accountIndex + 1}:`, err.message);
+        if (attempts < 3) {
+          if (onProgress) {
+            onProgress({
+              status: 'retrying',
+              accountIndex: accountIndex + 1,
+              attempt: attempts,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 1200 * attempts));
+        }
+      }
+    }
+
+    // If all attempts failed due to network/RPC error, retry once after a longer delay rather than counting as empty
+    if (!fetchSuccess) {
+      console.warn(`RPC error for Account ${accountIndex + 1}. Retrying once after delay...`);
+      await new Promise((r) => setTimeout(r, 2000));
       try {
         signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+        fetchSuccess = true;
       } catch (e) {
-        signatures = [];
+        // Still failed: skip without incrementing consecutiveEmpty to avoid false stops
+        accountIndex++;
+        continue;
       }
     }
 
     if (signatures.length === 0) {
       consecutiveEmpty++;
+      if (onProgress) {
+        onProgress({
+          status: 'empty',
+          accountIndex: accountIndex + 1,
+          phantomAddress,
+          consecutiveEmpty,
+          gapLimit,
+          totalFound: activeWallets.length,
+        });
+      }
       accountIndex++;
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 200));
       continue;
     }
 
-    // Found active account
+    // Found active account: reset consecutive empty counter
     consecutiveEmpty = 0;
 
     const txDates = signatures
@@ -194,6 +234,7 @@ export async function scanSubWallets({
         accountIndex: accountIndex + 1,
         phantomAddress,
         txCount: signatures.length,
+        hasJun2025Tx,
       });
     }
 
@@ -222,6 +263,7 @@ export async function scanSubWallets({
         status: 'found',
         wallet: walletInfo,
         totalFound: activeWallets.length,
+        consecutiveEmpty: 0,
       });
     }
 

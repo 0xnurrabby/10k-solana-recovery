@@ -21,6 +21,18 @@ const proxyConfig = {
       });
     },
   },
+  '/solana-rpc': {
+    target: 'https://api.mainnet-beta.solana.com',
+    changeOrigin: true,
+    secure: true,
+    rewrite: (path) => path.replace(/^\/solana-rpc/, ''),
+    configure: (proxy) => {
+      proxy.on('proxyReq', (proxyReq) => {
+        proxyReq.removeHeader('origin');
+        proxyReq.removeHeader('referer');
+      });
+    },
+  },
 };
 
 export default defineConfig({
