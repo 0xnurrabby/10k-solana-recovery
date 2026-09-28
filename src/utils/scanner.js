@@ -90,7 +90,7 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
     try {
       attempts++;
       const initController = new AbortController();
-      const initTimeout = setTimeout(() => initController.abort(), 4000);
+      const initTimeout = setTimeout(() => initController.abort(), 8000);
 
       const initRes = await fetch('/privy-auth/api/v1/siws/init', {
         method: 'POST',
@@ -98,6 +98,7 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
           'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
           'content-type': 'application/json',
         },
+        credentials: 'omit',
         body: JSON.stringify({ address: phantomAddress }),
         signal: initController.signal,
       });
@@ -143,7 +144,7 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
       const signatureBase64 = toBase64(sig);
 
       const authController = new AbortController();
-      const authTimeout = setTimeout(() => authController.abort(), 4000);
+      const authTimeout = setTimeout(() => authController.abort(), 8000);
 
       const authRes = await fetch('/privy-auth/api/v1/siws/authenticate', {
         method: 'POST',
@@ -151,6 +152,7 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
           'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
           'content-type': 'application/json',
         },
+        credentials: 'omit',
         body: JSON.stringify({ message, signature: signatureBase64 }),
         signal: authController.signal,
       });
@@ -171,13 +173,13 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
       const isNewUser = authData.is_new_user === true;
 
       // Find any embedded / privy-managed solana wallet in linked_accounts
-      // Priority 1: explicitly marked as privy/embedded
+      // Priority 1: explicitly marked as privy/embedded or recovery_method privy
       let embedded = user?.linked_accounts?.find(
         (acc) =>
           acc.type === 'wallet' &&
           acc.chain_type === 'solana' &&
-          acc.address !== phantomAddress &&
-          (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded' || acc.wallet_client === 'privy')
+          acc.address?.toLowerCase() !== phantomAddress.toLowerCase() &&
+          (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded' || acc.wallet_client === 'privy' || acc.recovery_method === 'privy')
       );
 
       // Priority 2: any solana wallet linked to this account that is not the phantom wallet itself
@@ -186,7 +188,7 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
           (acc) =>
             acc.type === 'wallet' &&
             acc.chain_type === 'solana' &&
-            acc.address !== phantomAddress
+            acc.address?.toLowerCase() !== phantomAddress.toLowerCase()
         );
       }
 

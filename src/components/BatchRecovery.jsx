@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { useLoginWithSiws } from '@privy-io/react-auth';
+import React, { useState, useRef, useEffect } from 'react';
+import { usePrivy, useLoginWithSiws } from '@privy-io/react-auth';
 import { useSolanaWallets, useExportWallet } from '@privy-io/react-auth/solana';
 import nacl from 'tweetnacl';
 import { 
@@ -43,6 +43,7 @@ export function BatchRecovery({ onCopy, onError }) {
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
 
+  const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
   const solanaWalletsHook = useSolanaWallets();
   const { exportWallet: exportWalletFromHook } = useExportWallet();
@@ -51,6 +52,17 @@ export function BatchRecovery({ onCopy, onError }) {
   const detectedPhrases = detected.phrases;
   const detectedPrivateKeys = detected.privateKeys;
   const hasAnyInput = detectedPhrases.length > 0 || detectedPrivateKeys.length > 0;
+
+  // Auto-capture clipboard when window regains focus after closing Privy export modal
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (exportingIndex !== null) {
+        checkAndCaptureClipboard(exportingIndex);
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [exportingIndex]);
 
   const handleCopyText = async (text, id, label) => {
     if (!text) return;
@@ -222,47 +234,75 @@ export function BatchRecovery({ onCopy, onError }) {
       const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
       if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
 
-      // 1. Fetch fresh SIWS nonce
-      const initRes = await fetch('/privy-auth/api/v1/siws/init', {
-        method: 'POST',
-        headers: {
-          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ address: wallet.phantomAddress }),
-      });
+      // Check if Privy is currently logged in with this sub-account
+      const isAlreadyCurrentAccount =
+        authenticated &&
+        user?.linkedAccounts?.some(
+          (acc) => acc.address?.toLowerCase() === wallet.phantomAddress?.toLowerCase()
+        );
 
-      const initData = await initRes.json();
-      const nonce = initData?.nonce;
-      if (!nonce) {
-        throw new Error('Failed to retrieve fresh authentication nonce from Privy');
+      if (!isAlreadyCurrentAccount) {
+        // If logged into a different account, log out first to switch sessions cleanly
+        if (authenticated) {
+          if (onCopy) onCopy(`Switching session to ${accLabel}...`);
+          try {
+            await logout();
+            await new Promise((r) => setTimeout(r, 400));
+          } catch (logoutErr) {
+            console.warn('Logout notice:', logoutErr);
+          }
+        }
+
+        // Fetch fresh SIWS nonce with credentials: omit so no lingering cookies interfere
+        const initRes = await fetch('/privy-auth/api/v1/siws/init', {
+          method: 'POST',
+          headers: {
+            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+            'content-type': 'application/json',
+          },
+          credentials: 'omit',
+          body: JSON.stringify({ address: wallet.phantomAddress }),
+        });
+
+        const initData = await initRes.json();
+        const nonce = initData?.nonce;
+        if (!nonce) {
+          throw new Error('Failed to retrieve fresh authentication nonce from Privy');
+        }
+
+        const issuedAt = new Date().toISOString();
+        const message = [
+          `10k.world wants you to sign in with your Solana account:`,
+          wallet.phantomAddress,
+          '',
+          `You are proving you own ${wallet.phantomAddress}.`,
+          '',
+          `URI: https://10k.world`,
+          `Version: 1`,
+          `Chain ID: mainnet`,
+          `Nonce: ${nonce}`,
+          `Issued At: ${issuedAt}`,
+          `Resources:`,
+          `- https://privy.io`,
+        ].join('\n');
+
+        const msgBytes = new TextEncoder().encode(message);
+        const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
+        const signatureBase64 = toBase64(sig);
+
+        // Sign into Privy React SDK session
+        try {
+          await loginWithSiws({
+            message,
+            signature: signatureBase64,
+          });
+        } catch (siwsErr) {
+          // If already authenticated, proceed without throwing
+          if (!siwsErr?.message?.includes('already authenticated')) {
+            throw siwsErr;
+          }
+        }
       }
-
-      const issuedAt = new Date().toISOString();
-      const message = [
-        `10k.world wants you to sign in with your Solana account:`,
-        wallet.phantomAddress,
-        '',
-        `You are proving you own ${wallet.phantomAddress}.`,
-        '',
-        `URI: https://10k.world`,
-        `Version: 1`,
-        `Chain ID: mainnet`,
-        `Nonce: ${nonce}`,
-        `Issued At: ${issuedAt}`,
-        `Resources:`,
-        `- https://privy.io`,
-      ].join('\n');
-
-      const msgBytes = new TextEncoder().encode(message);
-      const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
-      const signatureBase64 = toBase64(sig);
-
-      // Sign into Privy React SDK session
-      await loginWithSiws({
-        message,
-        signature: signatureBase64,
-      });
 
       if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key inside modal.`);
       await new Promise((r) => setTimeout(r, 600));
@@ -346,7 +386,7 @@ export function BatchRecovery({ onCopy, onError }) {
     setIsBatchExporting(true);
     cancelBatchExportRef.current = false;
 
-    if (onCopy) onCopy(`Starting sequential export for ${pendingWallets.length} wallet(s)...`);
+    if (onCopy) onCopy(`Starting sequential export for ${pendingWallets.length} 10K wallet(s)...`);
 
     for (let i = 0; i < pendingWallets.length; i++) {
       if (cancelBatchExportRef.current) break;
@@ -363,7 +403,7 @@ export function BatchRecovery({ onCopy, onError }) {
     }
 
     setIsBatchExporting(false);
-    if (onCopy) onCopy('Sequential export completed! Click "Export Report (.txt)" to download all keys.');
+    if (onCopy) onCopy('Sequential export completed! Click "Export 10K Keys (.txt)" to download all captured keys.');
   };
 
   const handleRecheckPrivy = async (wallet, index) => {
@@ -404,30 +444,54 @@ export function BatchRecovery({ onCopy, onError }) {
     }
   };
 
-  const handleDownloadTXT = () => {
+  // Dedicated Export for Real 10K Embedded Private Keys ONLY
+  const handleDownload10kKeysTXT = () => {
     if (discoveredWallets.length === 0) return;
 
-    // Strictly output raw private keys, ONE PER LINE, NO HEADERS, NO LABELS, NOTHING ELSE.
-    // Prioritize 10K embedded private key (marked in user screenshot), fallback to Phantom private key.
-    const keys = discoveredWallets
-      .map((w) => w.exported10kKey || w.secretKeyBase58)
+    const capturedKeys = discoveredWallets
+      .map((w) => w.exported10kKey)
       .filter(Boolean);
 
-    if (keys.length === 0) {
-      if (onError) onError('No private keys available to export.');
+    if (capturedKeys.length === 0) {
+      if (onError) {
+        onError('No 10K private keys captured yet. Click "Export Private Key" on each account (or "Batch Export 10K Keys") to unlock and capture them first.');
+      }
       return;
     }
 
-    const txtContent = keys.join('\n') + '\n';
-
+    const txtContent = capturedKeys.join('\n') + '\n';
     const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = '10k_wallet_private_keys.txt';
+    a.download = '10k_embedded_private_keys.txt';
     a.click();
     URL.revokeObjectURL(url);
-    if (onCopy) onCopy(`Exported ${keys.length} private keys (.txt) successfully`);
+    if (onCopy) onCopy(`Exported ${capturedKeys.length} 10K embedded private key(s) (.txt) successfully`);
+  };
+
+  // Dedicated Export for Phantom Sub-Account Private Keys
+  const handleDownloadPhantomKeysTXT = () => {
+    if (discoveredWallets.length === 0) return;
+
+    const phantomKeys = discoveredWallets
+      .map((w) => w.secretKeyBase58)
+      .filter(Boolean);
+
+    if (phantomKeys.length === 0) {
+      if (onError) onError('No Phantom sub-account private keys available.');
+      return;
+    }
+
+    const txtContent = phantomKeys.join('\n') + '\n';
+    const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'phantom_sub_account_keys.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+    if (onCopy) onCopy(`Exported ${phantomKeys.length} Phantom sub-account private keys (.txt) successfully`);
   };
 
   const handleDownloadJSON = () => {
@@ -602,19 +666,31 @@ export function BatchRecovery({ onCopy, onError }) {
                 )
               )}
 
+              {/* Dedicated Export for Real 10K Keys */}
               <button
                 type="button"
-                onClick={handleDownloadTXT}
+                onClick={handleDownload10kKeysTXT}
                 className="flex-1 sm:flex-initial px-4 py-3.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
-                title="Download txt containing only the private keys, one per line"
+                title="Download .txt containing ONLY real 10K embedded wallet private keys"
               >
                 <FileText className="w-3.5 h-3.5" />
                 <span>
-                  Export Report (.txt)
-                  {discoveredWallets.some((w) => w.exported10kKey)
-                    ? ` (${discoveredWallets.filter((w) => w.exported10kKey).length} 10K Keys)`
+                  Export 10K Keys (.txt)
+                  {discoveredWallets.filter((w) => w.exported10kKey).length > 0
+                    ? ` (${discoveredWallets.filter((w) => w.exported10kKey).length} Ready)`
                     : ''}
                 </span>
+              </button>
+
+              {/* Dedicated Export for Phantom Sub-Account Keys */}
+              <button
+                type="button"
+                onClick={handleDownloadPhantomKeysTXT}
+                className="flex-1 sm:flex-initial px-4 py-3.5 rounded-full border border-gray-300 hover:bg-gray-100 text-gray-800 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                title="Download .txt containing Phantom sub-account private keys, one per line"
+              >
+                <Download className="w-3.5 h-3.5 text-gray-500" />
+                <span>Export Phantom Keys (.txt)</span>
               </button>
 
               <button
