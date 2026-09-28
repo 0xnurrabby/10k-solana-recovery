@@ -85,25 +85,33 @@ export function deriveAccountFromSeed(seed, index) {
 }
 
 export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let attempts = 0;
+  while (attempts < 3) {
     try {
-      const initRes = await Promise.race([
-        fetch('/privy-auth/api/v1/siws/init', {
-          method: 'POST',
-          headers: {
-            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ address: phantomAddress }),
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('init timeout')), 4000)),
-      ]);
+      attempts++;
+      const initRes = await fetch('/privy-auth/api/v1/siws/init', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ address: phantomAddress }),
+      });
+
+      if (!initRes.ok) {
+        console.warn(`[Privy SIWS Init Attempt ${attempts}] HTTP ${initRes.status} for ${phantomAddress}`);
+        if (attempts < 3) {
+          await new Promise((r) => setTimeout(r, 1000 * attempts));
+          continue;
+        }
+        return { success: false, error: `Init HTTP ${initRes.status}` };
+      }
 
       const initData = await initRes.json();
       const nonce = initData?.nonce;
       if (!nonce) {
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 600));
+        if (attempts < 3) {
+          await new Promise((r) => setTimeout(r, 1000 * attempts));
           continue;
         }
         return { success: false, error: 'Failed to retrieve nonce' };
@@ -129,28 +137,50 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
       const sig = nacl.sign.detached(msgBytes, keypair.secretKey);
       const signatureBase64 = toBase64(sig);
 
-      const authRes = await Promise.race([
-        fetch('/privy-auth/api/v1/siws/authenticate', {
-          method: 'POST',
-          headers: {
-            'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ message, signature: signatureBase64 }),
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('auth timeout')), 4000)),
-      ]);
+      const authRes = await fetch('/privy-auth/api/v1/siws/authenticate', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ message, signature: signatureBase64 }),
+      });
+
+      if (!authRes.ok) {
+        console.warn(`[Privy SIWS Auth Attempt ${attempts}] HTTP ${authRes.status} for ${phantomAddress}`);
+        if (attempts < 3) {
+          await new Promise((r) => setTimeout(r, 1200 * attempts));
+          continue;
+        }
+        return { success: false, error: `Auth HTTP ${authRes.status}` };
+      }
 
       const authData = await authRes.json();
       const user = authData.user;
       const token = authData.token || authData.privy_access_token;
+      const isNewUser = authData.is_new_user === true;
 
-      const embedded = user?.linked_accounts?.find(
+      // Find any embedded / privy-managed solana wallet in linked_accounts
+      // Priority 1: explicitly marked as privy/embedded
+      let embedded = user?.linked_accounts?.find(
         (acc) =>
           acc.type === 'wallet' &&
           acc.chain_type === 'solana' &&
-          (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded')
+          acc.address !== phantomAddress &&
+          (acc.wallet_client_type === 'privy' || acc.connector_type === 'embedded' || acc.wallet_client === 'privy')
       );
+
+      // Priority 2: any solana wallet linked to this account that is not the phantom wallet itself
+      if (!embedded) {
+        embedded = user?.linked_accounts?.find(
+          (acc) =>
+            acc.type === 'wallet' &&
+            acc.chain_type === 'solana' &&
+            acc.address !== phantomAddress
+        );
+      }
+
+      console.log(`[Privy SIWS] ${phantomAddress}: is_new_user=${isNewUser}, linked_accounts=${user?.linked_accounts?.length || 0}, embedded=${embedded?.address || 'None'}`);
 
       return {
         success: true,
@@ -158,17 +188,20 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
         signature: signatureBase64,
         user,
         token,
+        isNewUser,
         embeddedWalletAddress: embedded?.address || null,
       };
     } catch (err) {
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 800));
+      console.warn(`[Privy SIWS Attempt ${attempts}] Error for ${phantomAddress}:`, err.message);
+      if (attempts < 3) {
+        await new Promise((r) => setTimeout(r, 1000 * attempts));
         continue;
       }
       return { success: false, error: err.message };
     }
   }
-  return { success: false, error: 'Authentication failed' };
+
+  return { success: false, error: 'Max retry attempts exceeded' };
 }
 
 export function parseRecoveryInput(rawInput) {
@@ -187,12 +220,7 @@ export function parseRecoveryInput(rawInput) {
         const arr = JSON.parse(match);
         if (arr.length === 64 || arr.length === 32) {
           const bytes = new Uint8Array(arr);
-          let keypair;
-          try {
-            keypair = arr.length === 64 ? Keypair.fromSecretKey(bytes) : Keypair.fromSeed(bytes);
-          } catch {
-            keypair = Keypair.fromSeed(bytes.slice(0, 32));
-          }
+          const keypair = arr.length === 64 ? Keypair.fromSecretKey(bytes) : Keypair.fromSeed(bytes);
           const pk = keypair.publicKey.toBase58();
           if (!seenPrivateKeys.has(pk)) {
             seenPrivateKeys.add(pk);
@@ -214,17 +242,8 @@ export function parseRecoveryInput(rawInput) {
   for (const candidate of base58Candidates) {
     try {
       const bytes = decodeBase58(candidate);
-      let keypair = null;
       if (bytes.length === 64) {
-        try {
-          keypair = Keypair.fromSecretKey(bytes);
-        } catch {
-          keypair = Keypair.fromSeed(bytes.slice(0, 32));
-        }
-      } else if (bytes.length === 32) {
-        keypair = Keypair.fromSeed(bytes);
-      }
-      if (keypair) {
+        const keypair = Keypair.fromSecretKey(bytes);
         const pk = keypair.publicKey.toBase58();
         if (!seenPrivateKeys.has(pk)) {
           seenPrivateKeys.add(pk);
@@ -236,14 +255,27 @@ export function parseRecoveryInput(rawInput) {
             rawInput: candidate,
           });
         }
+      } else if (bytes.length === 32) {
+        const keypair = Keypair.fromSeed(bytes);
+        const pk = keypair.publicKey.toBase58();
+        if (!seenPrivateKeys.has(pk)) {
+          seenPrivateKeys.add(pk);
+          privateKeys.push({
+            keypair,
+            secretKeyBytes: bytes,
+            secretKeyBase58: encodeBase58(keypair.secretKey),
+            phantomAddress: pk,
+            rawInput: candidate,
+          });
+        }
       }
     } catch (e) {}
   }
 
-  // 3. Wrapped base58 lines check (stitched)
-  const rawLines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // 3. Check for wrapped base58 lines (e.g. copied from notes or terminal with soft line breaks)
+  const lines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   let currentBuffer = '';
-  for (const line of rawLines) {
+  for (const line of lines) {
     if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(line)) {
       currentBuffer = '';
       continue;
@@ -252,15 +284,8 @@ export function parseRecoveryInput(rawInput) {
     if (currentBuffer.length >= 85 && currentBuffer.length <= 90) {
       try {
         const bytes = decodeBase58(currentBuffer);
-        let keypair = null;
         if (bytes.length === 64) {
-          try {
-            keypair = Keypair.fromSecretKey(bytes);
-          } catch {
-            keypair = Keypair.fromSeed(bytes.slice(0, 32));
-          }
-        }
-        if (keypair) {
+          const keypair = Keypair.fromSecretKey(bytes);
           const pk = keypair.publicKey.toBase58();
           if (!seenPrivateKeys.has(pk)) {
             seenPrivateKeys.add(pk);
@@ -281,20 +306,13 @@ export function parseRecoveryInput(rawInput) {
   }
 
   // 4. Mnemonic seed phrases (BIP39 12/24 words)
-  // Clean private keys from text before looking for seed words so keys never pollute phrase parsing
-  let cleanInputForPhrases = rawInput;
-  for (const pk of privateKeys) {
-    if (pk.rawInput) cleanInputForPhrases = cleanInputForPhrases.replace(pk.rawInput, ' ');
-    if (pk.secretKeyBase58) cleanInputForPhrases = cleanInputForPhrases.replace(pk.secretKeyBase58, ' ');
-  }
-
   // Check numbered sections (e.g. "1.\n words...", "2.\n words...")
-  const numberedSections = cleanInputForPhrases.split(/(?:^|\n)\s*(?:\d+[\.\)\:\-]|#\d+[\:\-]?|Phrase\s*\d+[\:\-]|\bAccount\s*\d+[\:\-])\s*/i);
+  const numberedSections = rawInput.split(/(?:^|\n)\s*(?:\d+[\.\)\:\-]|#\d+[\:\-]?|Phrase\s*\d+[\:\-]|\bAccount\s*\d+[\:\-])\s*/i);
 
   for (const section of numberedSections) {
     const trimmed = section.trim();
     if (!trimmed) continue;
-    const tokens = (trimmed.match(/\b[a-z]{3,8}\b/gi) || []).map((w) => w.toLowerCase());
+    const tokens = trimmed.toLowerCase().match(/[a-z]+/g) || [];
     const bipWords = tokens.filter((t) => bip39WordSet.has(t));
     if (bipWords.length >= 12) {
       let i = 0;
@@ -320,9 +338,9 @@ export function parseRecoveryInput(rawInput) {
     }
   }
 
-  // Fallback: tokenize entire cleaned text for BIP39 words if numbered split found nothing
+  // Fallback: tokenize entire input for BIP39 words if numbered split found nothing
   if (phrases.length === 0) {
-    const allTokens = (cleanInputForPhrases.match(/\b[a-z]{3,8}\b/gi) || []).map((w) => w.toLowerCase());
+    const allTokens = rawInput.toLowerCase().match(/[a-z]+/g) || [];
     const bipWords = allTokens.filter((t) => bip39WordSet.has(t));
     let i = 0;
     while (i + 12 <= bipWords.length) {
@@ -354,31 +372,12 @@ export function parsePhrases(rawInput) {
   return phrases;
 }
 
-// Robust RPC helper with retry and timeout: never gives a false empty result!
-async function fetchSignaturesWithRetry(connection, publicKey) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const sigs = await Promise.race([
-        connection.getSignaturesForAddress(publicKey, { limit: 10 }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout')), 3500)),
-      ]);
-      return { success: true, signatures: sigs || [] };
-    } catch (err) {
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-      }
-    }
-  }
-  return { success: false, signatures: [] };
-}
-
 export async function scanSubWallets({
   mnemonic,
   onProgress,
   rpcUrl = typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : 'https://api.mainnet-beta.solana.com',
   gapLimit = 10,
   cancelSignal = null,
-  concurrency = 2,
 }) {
   const parsed = typeof mnemonic === 'object' && mnemonic !== null && (mnemonic.phrases !== undefined || mnemonic.privateKeys !== undefined)
     ? mnemonic
@@ -392,102 +391,117 @@ export async function scanSubWallets({
   const connection = new Connection(rpcUrl, 'confirmed');
   const allActiveWallets = [];
 
-  // 1. Process directly provided Private Keys (Pic 2 format) with safe concurrency (100% accuracy)
-  if (privateKeys.length > 0) {
-    const concurrencyLimit = Math.min(Math.max(1, concurrency), 3);
-    let nextIndex = 0;
+  // 1. Process directly provided Private Keys (from Pic 2 format)
+  for (let kIdx = 0; kIdx < privateKeys.length; kIdx++) {
+    if (cancelSignal && cancelSignal.isCancelled) break;
 
-    async function processKeyWorker() {
-      while (nextIndex < privateKeys.length) {
-        if (cancelSignal && cancelSignal.isCancelled) break;
-        const kIdx = nextIndex++;
-        const item = privateKeys[kIdx];
-        const label = privateKeys.length > 1 ? `Key ${kIdx + 1}` : 'Private Key 1';
+    const item = privateKeys[kIdx];
+    const label = privateKeys.length > 1 ? `Key ${kIdx + 1}` : 'Private Key 1';
 
-        if (onProgress) {
-          onProgress({
-            status: 'scanning_key',
-            keyIndex: kIdx + 1,
-            totalKeys: privateKeys.length,
-            phantomAddress: item.phantomAddress,
-            totalFound: allActiveWallets.length,
-            label,
-          });
+    if (onProgress) {
+      onProgress({
+        status: 'scanning_key',
+        keyIndex: kIdx + 1,
+        totalKeys: privateKeys.length,
+        phantomAddress: item.phantomAddress,
+        totalFound: allActiveWallets.length,
+        label,
+      });
+    }
+
+    let signatures = [];
+    let attempts = 0;
+    while (attempts < 3) {
+      try {
+        attempts++;
+        signatures = await connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 });
+        break;
+      } catch (err) {
+        console.warn(`RPC attempt ${attempts} failed for ${label}:`, err.message);
+        if (attempts < 3) {
+          if (onProgress) {
+            onProgress({
+              status: 'retrying',
+              label,
+              attempt: attempts,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 1200 * attempts));
         }
-
-        const rpcRes = await fetchSignaturesWithRetry(connection, item.keypair.publicKey);
-        const signatures = rpcRes.signatures;
-
-        const txDates = signatures
-          .filter((s) => s.blockTime)
-          .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
-
-        const hasJun2025Tx = signatures.some((sig) => {
-          if (!sig.blockTime) return false;
-          const d = new Date(sig.blockTime * 1000);
-          return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
-        });
-
-        // Authenticate with Privy via SIWS
-        const privyResult = await authenticateSubAccountWithPrivy(item.keypair, item.phantomAddress);
-
-        const walletInfo = {
-          type: 'private_key',
-          keyIndex: kIdx + 1,
-          accountIndex: kIdx + 1,
-          label,
-          derivationPath: 'Direct Private Key',
-          phantomAddress: item.phantomAddress,
-          secretKeyBase58: item.secretKeyBase58,
-          keypair: item.keypair,
-          txCount: signatures.length,
-          txDates,
-          hasJun2025Tx,
-          embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
-          privyMessage: privyResult.message || null,
-          privySignature: privyResult.signature || null,
-          privyUserId: privyResult.user?.id || null,
-        };
-
-        allActiveWallets.push(walletInfo);
-
-        if (onProgress) {
-          onProgress({
-            status: 'found',
-            wallet: walletInfo,
-            totalFound: allActiveWallets.length,
-            label,
-          });
-        }
-
-        // Safe throttle to prevent any RPC rate limit
-        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
-    const workers = Array.from({ length: concurrencyLimit }, () => processKeyWorker());
-    await Promise.all(workers);
+    const txDates = signatures
+      .filter((s) => s.blockTime)
+      .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
 
-    allActiveWallets.sort((a, b) => (a.keyIndex || 0) - (b.keyIndex || 0));
+    const hasJun2025Tx = signatures.some((sig) => {
+      if (!sig.blockTime) return false;
+      const d = new Date(sig.blockTime * 1000);
+      return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
+    });
+
+    if (onProgress) {
+      onProgress({
+        status: 'authenticating',
+        keyIndex: kIdx + 1,
+        phantomAddress: item.phantomAddress,
+        txCount: signatures.length,
+        hasJun2025Tx,
+        label,
+      });
+    }
+
+    // Authenticate with Privy via SIWS
+    const privyResult = await authenticateSubAccountWithPrivy(item.keypair, item.phantomAddress);
+
+    const walletInfo = {
+      type: 'private_key',
+      keyIndex: kIdx + 1,
+      accountIndex: kIdx + 1,
+      label,
+      derivationPath: 'Direct Private Key',
+      phantomAddress: item.phantomAddress,
+      secretKeyBase58: item.secretKeyBase58,
+      keypair: item.keypair,
+      txCount: signatures.length,
+      txDates,
+      hasJun2025Tx,
+      embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
+      isNewUser: privyResult.isNewUser || false,
+      privyError: privyResult.error || null,
+      privyMessage: privyResult.message || null,
+      privySignature: privyResult.signature || null,
+      privyUserId: privyResult.user?.id || null,
+    };
+
+    allActiveWallets.push(walletInfo);
+
+    if (onProgress) {
+      onProgress({
+        status: 'found',
+        wallet: walletInfo,
+        totalFound: allActiveWallets.length,
+        label,
+      });
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
   }
 
-  // 2. Process Seed Phrases (Pic 1 format) accurately (never misses an account!)
+  // 2. Process Seed Phrases (from Pic 1 format)
   for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
     if (cancelSignal && cancelSignal.isCancelled) break;
 
     const currentPhrase = phrases[pIdx];
-    let seed;
-    try {
-      seed = Buffer.from(bip39.mnemonicToSeedSync(currentPhrase));
-    } catch {
-      continue;
-    }
-
+    const seed = Buffer.from(bip39.mnemonicToSeedSync(currentPhrase));
     let consecutiveEmpty = 0;
     let accountIndex = 0;
 
     while (consecutiveEmpty < gapLimit) {
-      if (cancelSignal && cancelSignal.isCancelled) break;
+      if (cancelSignal && cancelSignal.isCancelled) {
+        break;
+      }
 
       const derived = deriveAccountFromSeed(seed, accountIndex);
       const { phantomAddress, keypair, path } = derived;
@@ -509,16 +523,45 @@ export async function scanSubWallets({
         });
       }
 
-      const rpcRes = await fetchSignaturesWithRetry(connection, keypair.publicKey);
+      let signatures = [];
+      let fetchSuccess = false;
+      let attempts = 0;
 
-      // If RPC failed completely, do not increment consecutiveEmpty to avoid false stops!
-      if (!rpcRes.success) {
-        accountIndex++;
-        await new Promise((r) => setTimeout(r, 300));
-        continue;
+      while (!fetchSuccess && attempts < 3) {
+        try {
+          attempts++;
+          signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+          fetchSuccess = true;
+        } catch (err) {
+          console.warn(`RPC attempt ${attempts} failed for ${label}:`, err.message);
+          if (attempts < 3) {
+            if (onProgress) {
+              onProgress({
+                status: 'retrying',
+                phraseIndex: pIdx + 1,
+                totalPhrases: phrases.length,
+                accountIndex: accountIndex + 1,
+                attempt: attempts,
+                label,
+              });
+            }
+            await new Promise((r) => setTimeout(r, 1200 * attempts));
+          }
+        }
       }
 
-      const signatures = rpcRes.signatures;
+      // If all attempts failed due to network/RPC error, retry once after a delay
+      if (!fetchSuccess) {
+        console.warn(`RPC error for ${label}. Retrying once after delay...`);
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+          fetchSuccess = true;
+        } catch (e) {
+          accountIndex++;
+          continue;
+        }
+      }
 
       if (signatures.length === 0) {
         consecutiveEmpty++;
@@ -536,7 +579,7 @@ export async function scanSubWallets({
           });
         }
         accountIndex++;
-        await new Promise((r) => setTimeout(r, 120));
+        await new Promise((r) => setTimeout(r, 200));
         continue;
       }
 
@@ -566,6 +609,7 @@ export async function scanSubWallets({
         });
       }
 
+      // Authenticate with Privy automatically
       const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
 
       const walletInfo = {
@@ -581,6 +625,8 @@ export async function scanSubWallets({
         txDates,
         hasJun2025Tx,
         embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
+        isNewUser: privyResult.isNewUser || false,
+        privyError: privyResult.error || null,
         privyMessage: privyResult.message || null,
         privySignature: privyResult.signature || null,
         privyUserId: privyResult.user?.id || null,
@@ -599,7 +645,7 @@ export async function scanSubWallets({
       }
 
       accountIndex++;
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 300));
     }
   }
 

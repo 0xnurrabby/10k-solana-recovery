@@ -22,10 +22,9 @@ import {
   Terminal,
   Activity,
   Layers,
-  Key,
-  Zap
+  Key
 } from 'lucide-react';
-import { scanSubWallets, toBase64, parseRecoveryInput } from '../utils/scanner';
+import { scanSubWallets, toBase64, parseRecoveryInput, authenticateSubAccountWithPrivy } from '../utils/scanner';
 
 export function BatchRecovery({ onCopy, onError }) {
   const [mnemonic, setMnemonic] = useState('');
@@ -35,6 +34,7 @@ export function BatchRecovery({ onCopy, onError }) {
   const [scanLogs, setScanLogs] = useState([]);
   const [discoveredWallets, setDiscoveredWallets] = useState([]);
   const [exportingIndex, setExportingIndex] = useState(null);
+  const [recheckingIndex, setRecheckingIndex] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [visiblePrivateKeys, setVisiblePrivateKeys] = useState({});
   const [showAllPrivateKeys, setShowAllPrivateKeys] = useState(false);
@@ -103,37 +103,32 @@ export function BatchRecovery({ onCopy, onError }) {
     setScanProgress({
       message: `Initializing scan across ${initLabels.join(' and ')}...`,
       accountIndex: 0,
-      total: parsed.privateKeys.length || 0,
       consecutiveEmpty: 0,
     });
 
     try {
       const results = await scanSubWallets({
         mnemonic: parsed,
-        concurrency: 2,
         cancelSignal: cancelSignalRef.current,
         onProgress: (p) => {
           if (p.status === 'scanning_key') {
             setScanProgress({
               message: `Checking Key ${p.keyIndex}/${p.totalKeys} (${p.phantomAddress.slice(0, 4)}...${p.phantomAddress.slice(-4)})`,
               accountIndex: p.keyIndex,
-              total: p.totalKeys,
               consecutiveEmpty: 0,
             });
           } else if (p.status === 'scanning') {
             const phrasePrefix = p.totalPhrases > 1 ? `[Phrase ${p.phraseIndex}/${p.totalPhrases}] ` : '';
             setScanProgress({
               message: `${phrasePrefix}Checking Account ${p.accountIndex} (${p.phantomAddress.slice(0, 4)}...${p.phantomAddress.slice(-4)})`,
-              accountIndex: p.totalPhrases > 1 ? `P${p.phraseIndex}/${p.totalPhrases} · Acc ${p.accountIndex}` : p.accountIndex,
-              total: null,
+              accountIndex: p.accountIndex,
               consecutiveEmpty: p.consecutiveEmpty,
             });
           } else if (p.status === 'empty') {
             const phrasePrefix = p.totalPhrases > 1 ? `[Phrase ${p.phraseIndex}/${p.totalPhrases}] ` : '';
             setScanProgress({
-              message: `${phrasePrefix}Account ${p.accountIndex}: No transactions (${p.consecutiveEmpty}/10 empty)`,
-              accountIndex: p.totalPhrases > 1 ? `P${p.phraseIndex}/${p.totalPhrases} · Acc ${p.accountIndex}` : p.accountIndex,
-              total: null,
+              message: `${phrasePrefix}Account ${p.accountIndex}: No transactions (Empty streak ${p.consecutiveEmpty}/10)`,
+              accountIndex: p.accountIndex,
               consecutiveEmpty: p.consecutiveEmpty,
             });
             setScanLogs((prev) => [
@@ -161,6 +156,15 @@ export function BatchRecovery({ onCopy, onError }) {
                 id: Math.random().toString(),
                 type: 'found',
                 text: `${p.wallet.label} (${p.wallet.phantomAddress.slice(0, 4)}...${p.wallet.phantomAddress.slice(-4)}): ${p.wallet.txCount} txns. Linked 10k: ${p.wallet.embeddedWalletAddress ? p.wallet.embeddedWalletAddress.slice(0, 4) + '...' + p.wallet.embeddedWalletAddress.slice(-4) : 'None'}`,
+              },
+            ]);
+          } else if (p.status === 'retrying') {
+            setScanLogs((prev) => [
+              ...prev.slice(-24),
+              {
+                id: Math.random().toString(),
+                type: 'retry',
+                text: `${p.label}: Rate limit encountered, retrying attempt ${p.attempt}/3...`,
               },
             ]);
           }
@@ -193,6 +197,7 @@ export function BatchRecovery({ onCopy, onError }) {
       const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
       if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
 
+      // 1. Fetch fresh SIWS nonce
       const initRes = await fetch('/privy-auth/api/v1/siws/init', {
         method: 'POST',
         headers: {
@@ -228,6 +233,7 @@ export function BatchRecovery({ onCopy, onError }) {
       const sig = nacl.sign.detached(msgBytes, wallet.keypair.secretKey);
       const signatureBase64 = toBase64(sig);
 
+      // Sign into Privy React SDK session
       await loginWithSiws({
         message,
         signature: signatureBase64,
@@ -236,6 +242,7 @@ export function BatchRecovery({ onCopy, onError }) {
       if (onCopy) onCopy(`Opening export modal for ${accLabel}...`);
       await new Promise((r) => setTimeout(r, 600));
 
+      // 2. Open Privy export modal for this embedded wallet
       if (typeof exportWalletFromHook === 'function') {
         await exportWalletFromHook({ address: wallet.embeddedWalletAddress });
       } else if (typeof solanaWalletsHook?.exportWallet === 'function') {
@@ -251,30 +258,49 @@ export function BatchRecovery({ onCopy, onError }) {
     }
   };
 
-  // 1. Clean Private Keys ONLY export (one per line, nothing else)
-  const handleDownloadKeysOnlyTXT = () => {
-    if (discoveredWallets.length === 0) return;
-    const keys = discoveredWallets
-      .map((w) => w.secretKeyBase58)
-      .filter(Boolean)
-      .join('\n');
+  const handleRecheckPrivy = async (wallet, index) => {
+    try {
+      setRecheckingIndex(index);
+      const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
+      if (onCopy) onCopy(`Connecting with Privy for ${accLabel}...`);
 
-    const blob = new Blob([keys], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = '10k_private_keys.txt';
-    a.click();
-    URL.revokeObjectURL(url);
-    if (onCopy) onCopy(`Exported ${discoveredWallets.length} private keys to 10k_private_keys.txt`);
+      const res = await authenticateSubAccountWithPrivy(wallet.keypair, wallet.phantomAddress);
+
+      setDiscoveredWallets((prev) => {
+        const updated = [...prev];
+        updated[index] = {
+          ...updated[index],
+          embeddedWalletAddress: res.embeddedWalletAddress || null,
+          isNewUser: res.isNewUser || false,
+          privyError: res.error || null,
+          privyMessage: res.message || null,
+          privySignature: res.signature || null,
+          privyUserId: res.user?.id || null,
+        };
+        return updated;
+      });
+
+      if (res.embeddedWalletAddress) {
+        if (onCopy) onCopy(`Linked 10k embedded wallet found: ${res.embeddedWalletAddress}`);
+      } else if (res.isNewUser) {
+        if (onCopy) onCopy('Privy confirms: No 10k embedded wallet was created with this account.');
+      } else if (res.error) {
+        if (onError) onError(`Privy API: ${res.error}`);
+      } else {
+        if (onCopy) onCopy('Checked Privy: No embedded wallet linked to this account.');
+      }
+    } catch (err) {
+      if (onError) onError(err.message || 'Failed to re-check Privy.');
+    } finally {
+      setRecheckingIndex(null);
+    }
   };
 
-  // 2. Full detailed audit report
-  const handleDownloadFullReportTXT = () => {
+  const handleDownloadTXT = () => {
     if (discoveredWallets.length === 0) return;
 
     let txt = '======================================================================\n';
-    txt += '            10K.WORLD WALLET RECOVERY AUDIT REPORT                    \n';
+    txt += '            10K.WORLD WALLET RECOVERY REPORT                          \n';
     txt += `  Generated: ${new Date().toLocaleString()}\n`;
     txt += `  Total Wallets Recovered: ${discoveredWallets.length}\n`;
     txt += '======================================================================\n\n';
@@ -285,8 +311,8 @@ export function BatchRecovery({ onCopy, onError }) {
       txt += `----------------------------------------------------------------------\n`;
       txt += `Type                    : ${w.type === 'private_key' ? 'Imported Private Key' : 'Derived Sub-Account'}\n`;
       txt += `Derivation Path         : ${w.derivationPath || 'N/A'}\n`;
-      txt += `Solana Wallet Address   : ${w.phantomAddress}\n`;
-      txt += `Solana Private Key      : ${w.secretKeyBase58}\n`;
+      txt += `Phantom Solana Address  : ${w.phantomAddress}\n`;
+      txt += `Phantom Private Key     : ${w.secretKeyBase58}\n`;
       txt += `On-Chain Solana Txns    : ${w.txCount}\n`;
       if (w.txDates && w.txDates.length > 0) {
         txt += `Recent Tx Dates         : ${w.txDates.slice(0, 5).join(', ')}\n`;
@@ -295,17 +321,32 @@ export function BatchRecovery({ onCopy, onError }) {
       txt += `Privy User ID           : ${w.privyUserId || 'N/A'}\n\n`;
     });
 
+    txt += '======================================================================\n';
+    txt += '  BULK PHANTOM PRIVATE KEYS (ONE PER LINE FOR IMPORT):\n';
+    txt += '======================================================================\n';
+    discoveredWallets.forEach((w) => {
+      txt += `${w.secretKeyBase58}\n`;
+    });
+
+    txt += '\n======================================================================\n';
+    txt += '  BULK LINKED 10K EMBEDDED WALLET ADDRESSES:\n';
+    txt += '======================================================================\n';
+    discoveredWallets.forEach((w) => {
+      if (w.embeddedWalletAddress) {
+        txt += `${w.embeddedWalletAddress}\n`;
+      }
+    });
+
     const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = '10k_wallet_audit_report.txt';
+    a.download = '10k_recovered_subwallets.txt';
     a.click();
     URL.revokeObjectURL(url);
-    if (onCopy) onCopy('Audit report (.txt) downloaded successfully');
+    if (onCopy) onCopy('Recovery report (.txt) downloaded successfully');
   };
 
-  // 3. JSON export
   const handleDownloadJSON = () => {
     if (discoveredWallets.length === 0) return;
     const exportData = discoveredWallets.map((w, i) => ({
@@ -340,19 +381,15 @@ export function BatchRecovery({ onCopy, onError }) {
       <div className="w-full bg-white border border-gray-200/80 rounded-3xl p-6 sm:p-8 space-y-5 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-bold text-gray-900 font-sans tracking-tight flex items-center gap-2">
-              <span>Auto Sub-Account & Key Recovery Scanner</span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-mono border border-emerald-200">
-                <Zap className="w-3 h-3 fill-current" />
-                100% Accurate
-              </span>
+            <h2 className="text-lg font-bold text-gray-900 font-sans tracking-tight">
+              Auto Sub-Account & Key Recovery Scanner
             </h2>
             <p className="text-xs text-gray-500 font-sans mt-0.5">
               Paste numbered seed phrases (1., 2.), multi-line notes, or raw Base58 private keys.
             </p>
           </div>
-          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-mono font-bold">
-            Rate-Limit Proof
+          <span className="px-2.5 py-0.5 rounded-full bg-gray-100 text-[11px] font-mono text-gray-600">
+            Gap Limit: 10 Empty
           </span>
         </div>
 
@@ -422,7 +459,7 @@ export function BatchRecovery({ onCopy, onError }) {
                   className="w-full sm:w-auto px-6 py-3.5 rounded-full bg-black text-white font-medium text-sm inline-flex items-center justify-center gap-2 shadow-sm opacity-90 cursor-wait"
                 >
                   <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                  <span>Scanning Concurrently...</span>
+                  <span>Scanning Accounts...</span>
                 </button>
                 <button
                   type="button"
@@ -443,11 +480,11 @@ export function BatchRecovery({ onCopy, onError }) {
                 <Search className="w-4 h-4 text-white" />
                 <span>
                   {detectedPhrases.length > 0 && detectedPrivateKeys.length > 0
-                    ? `Fast Scan ${detectedPhrases.length} Phrases & ${detectedPrivateKeys.length} Keys`
+                    ? `Scan ${detectedPhrases.length} Phrases & ${detectedPrivateKeys.length} Keys`
                     : detectedPhrases.length > 0
-                    ? `Fast Scan ${detectedPhrases.length > 1 ? `${detectedPhrases.length} Phrases` : 'Sub-Wallets'}`
+                    ? `Scan & Recover ${detectedPhrases.length > 1 ? `${detectedPhrases.length} Phrases` : 'Sub-Wallets'}`
                     : detectedPrivateKeys.length > 0
-                    ? `Fast Scan ${detectedPrivateKeys.length > 1 ? `${detectedPrivateKeys.length} Private Keys` : 'Private Key'}`
+                    ? `Scan & Recover ${detectedPrivateKeys.length > 1 ? `${detectedPrivateKeys.length} Private Keys` : 'Private Key'}`
                     : 'Scan & Recover Wallets'}
                 </span>
               </button>
@@ -456,24 +493,13 @@ export function BatchRecovery({ onCopy, onError }) {
 
           {discoveredWallets.length > 0 && !isScanning && (
             <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
-              {/* PRIMARY: Private Keys ONLY (one per line) */}
               <button
                 type="button"
-                onClick={handleDownloadKeysOnlyTXT}
-                className="flex-1 sm:flex-initial px-5 py-3.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm"
-              >
-                <KeyRound className="w-3.5 h-3.5" />
-                <span>Export Private Keys (.txt)</span>
-              </button>
-
-              {/* SECONDARY: Full Audit Report */}
-              <button
-                type="button"
-                onClick={handleDownloadFullReportTXT}
-                className="flex-1 sm:flex-initial px-4 py-3.5 rounded-full border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                onClick={handleDownloadTXT}
+                className="flex-1 sm:flex-initial px-4 py-3.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>Full Audit (.txt)</span>
+                <span>Export Report (.txt)</span>
               </button>
 
               <button
@@ -482,7 +508,7 @@ export function BatchRecovery({ onCopy, onError }) {
                 className="flex-1 sm:flex-initial px-4 py-3.5 rounded-full border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>JSON ({discoveredWallets.length})</span>
+                <span>Export JSON ({discoveredWallets.length})</span>
               </button>
             </div>
           )}
@@ -494,17 +520,15 @@ export function BatchRecovery({ onCopy, onError }) {
             <div className="grid grid-cols-3 gap-2">
               <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
                 <div className="text-[10px] font-mono text-gray-400 uppercase">Processed</div>
-                <div className="text-base font-bold font-mono text-gray-900">
-                  {scanProgress.accountIndex} {scanProgress.total ? `/ ${scanProgress.total}` : ''}
-                </div>
+                <div className="text-base font-bold font-mono text-gray-900">{scanProgress.accountIndex}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
-                <div className="text-[10px] font-mono text-gray-400 uppercase">Recovered</div>
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Found Active</div>
                 <div className="text-base font-bold font-mono text-emerald-600">{discoveredWallets.length}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
-                <div className="text-[10px] font-mono text-gray-400 uppercase">Mode</div>
-                <div className="text-base font-bold font-mono text-emerald-600">100% Accurate</div>
+                <div className="text-[10px] font-mono text-gray-400 uppercase">Empty Streak</div>
+                <div className="text-base font-bold font-mono text-gray-700">{scanProgress.consecutiveEmpty} / 10</div>
               </div>
             </div>
 
@@ -550,7 +574,7 @@ export function BatchRecovery({ onCopy, onError }) {
                 Discovered Wallets ({discoveredWallets.length})
               </h3>
               <p className="text-xs text-gray-500 font-sans">
-                Export Private Keys (.txt) gives you the pure private keys list (one per line) for direct import.
+                Each account is authenticated with 10k Privy to recover its linked embedded wallet.
               </p>
             </div>
 
@@ -591,45 +615,51 @@ export function BatchRecovery({ onCopy, onError }) {
                   </span>
                 </div>
 
-                {/* Solana Address & Private Key Box */}
-                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-100 space-y-2">
-                  <div className="flex items-center justify-between text-[11px] font-mono text-gray-500">
-                    <span>SOLANA WALLET PUBLIC KEY</span>
+                {/* Phantom Address Box */}
+                <div className="p-4 rounded-xl bg-gray-50/80 border border-gray-200/80 space-y-2.5">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-gray-500 flex-wrap gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="font-semibold text-gray-800">
+                        {wallet.type === 'private_key' ? 'PHANTOM WALLET (RECOVERED)' : 'PHANTOM SUB-ACCOUNT (RECOVERED)'}
+                      </span>
+                    </div>
+
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
                         onClick={() => togglePrivateKeyVisibility(idx)}
-                        className="text-gray-500 hover:text-gray-900 cursor-pointer text-[10px]"
+                        className="px-2.5 py-1 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 text-gray-700 text-[11px] font-sans transition-colors cursor-pointer"
                       >
-                        {visiblePrivateKeys[idx] ? 'Hide private key' : 'Show private key'}
+                        {visiblePrivateKeys[idx] ? 'Hide Key' : 'Reveal Key'}
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleCopyText(wallet.phantomAddress, `p-${idx}`, 'Wallet address')}
-                        className="inline-flex items-center gap-1 text-gray-600 hover:text-black cursor-pointer"
+                        onClick={() => handleCopyText(wallet.phantomAddress, `p-${idx}`, 'Phantom address')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 text-gray-700 text-[11px] font-sans transition-colors cursor-pointer"
                       >
                         {copiedKey === `p-${idx}` ? (
                           <Check className="w-3 h-3 text-emerald-600 stroke-[3]" />
                         ) : (
                           <Copy className="w-3 h-3" />
                         )}
-                        <span>Copy</span>
+                        <span>Copy Address</span>
                       </button>
                     </div>
                   </div>
 
-                  <div className="text-xs font-mono font-semibold text-gray-900 break-all select-all">
+                  <div className="text-xs font-mono font-semibold text-gray-900 break-all select-all bg-white p-2.5 rounded-lg border border-gray-200">
                     {wallet.phantomAddress}
                   </div>
 
                   {visiblePrivateKeys[idx] && (
                     <div className="pt-2 border-t border-gray-200/60 text-[11px] space-y-1">
                       <div className="flex items-center justify-between text-gray-500 font-mono text-[10px]">
-                        <span>SOLANA PRIVATE KEY (BASE58)</span>
+                        <span>PHANTOM PRIVATE KEY (BASE58)</span>
                         <button
                           type="button"
-                          onClick={() => handleCopyText(wallet.secretKeyBase58, `pk-${idx}`, 'Private key')}
-                          className="inline-flex items-center gap-1 text-gray-600 hover:text-black cursor-pointer"
+                          onClick={() => handleCopyText(wallet.secretKeyBase58, `pk-${idx}`, 'Phantom private key')}
+                          className="inline-flex items-center gap-1 text-gray-600 hover:text-black cursor-pointer font-sans"
                         >
                           {copiedKey === `pk-${idx}` ? (
                             <Check className="w-3 h-3 text-emerald-600 stroke-[3]" />
@@ -639,7 +669,7 @@ export function BatchRecovery({ onCopy, onError }) {
                           <span>Copy Key</span>
                         </button>
                       </div>
-                      <div className="font-mono text-gray-800 break-all select-all bg-white p-2.5 rounded-lg border border-gray-200 text-xs">
+                      <div className="font-mono text-gray-800 break-all select-all bg-emerald-50/50 p-2.5 rounded-lg border border-emerald-200 text-xs font-semibold">
                         {wallet.secretKeyBase58}
                       </div>
                     </div>
@@ -652,13 +682,11 @@ export function BatchRecovery({ onCopy, onError }) {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-gray-900">
                         <Wallet className="w-4 h-4 text-gray-600" />
-                        <span>LINKED 10K WALLET</span>
+                        <span>LINKED 10K EMBEDDED WALLET</span>
                       </div>
                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-mono font-semibold">
                         <Sparkles className="w-3 h-3 text-emerald-600" />
-                        {wallet.embeddedWalletAddress === wallet.phantomAddress
-                          ? 'Key Controls Directly'
-                          : 'Key Ready'}
+                        Key Ready
                       </span>
                     </div>
 
@@ -693,42 +721,65 @@ export function BatchRecovery({ onCopy, onError }) {
                       </div>
                     </div>
 
-                    {/* Action Button: Export Private Key via modal if different */}
-                    {wallet.embeddedWalletAddress !== wallet.phantomAddress ? (
-                      <button
-                        type="button"
-                        disabled={exportingIndex === idx}
-                        onClick={() => handleExportWallet(wallet, idx)}
-                        className="w-full py-3 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-xs inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-60 active:scale-[0.99]"
-                      >
-                        {exportingIndex === idx ? (
-                          <>
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                            <span>Opening Privy Export Modal...</span>
-                          </>
-                        ) : (
-                          <>
-                            <KeyRound className="w-3.5 h-3.5 text-white" />
-                            <span>Export Embedded Wallet Private Key</span>
-                          </>
-                        )}
-                      </button>
-                    ) : (
-                      <div className="flex items-center justify-between text-[11px] text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-100 font-sans">
-                        <span>This 10K wallet uses your private key directly. No modal export needed!</span>
-                        <button
-                          type="button"
-                          onClick={() => handleCopyText(wallet.secretKeyBase58, `direct-pk-${idx}`, 'Private key')}
-                          className="font-semibold underline cursor-pointer text-emerald-800 hover:text-black ml-2"
-                        >
-                          {copiedKey === `direct-pk-${idx}` ? 'Copied!' : 'Copy Key'}
-                        </button>
-                      </div>
-                    )}
+                    {/* Action Button: Export Private Key */}
+                    <button
+                      type="button"
+                      disabled={exportingIndex === idx}
+                      onClick={() => handleExportWallet(wallet, idx)}
+                      className="w-full py-3 rounded-full bg-black hover:bg-gray-900 text-white font-medium text-xs inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer disabled:opacity-60 active:scale-[0.99]"
+                    >
+                      {exportingIndex === idx ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+                          <span>Opening Privy Export Modal...</span>
+                        </>
+                      ) : (
+                        <>
+                          <KeyRound className="w-3.5 h-3.5 text-white" />
+                          <span>Export Private Key ({wallet.label || `Account ${wallet.accountIndex}`})</span>
+                        </>
+                      )}
+                    </button>
                   </div>
                 ) : (
-                  <div className="p-3.5 rounded-xl border border-dashed border-gray-200 text-xs text-gray-500 font-sans">
-                    No 10k embedded wallet found linked to this account.
+                  <div className="p-4 rounded-xl border border-gray-200/90 bg-gray-50/60 space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-gray-700">
+                        <Wallet className="w-3.5 h-3.5 text-gray-500" />
+                        <span>10K EMBEDDED WALLET STATUS</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={recheckingIndex === idx}
+                        onClick={() => handleRecheckPrivy(wallet, idx)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-gray-100 text-gray-800 text-xs font-medium transition-colors border border-gray-200 cursor-pointer shadow-xs disabled:opacity-60"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${recheckingIndex === idx ? 'animate-spin text-black' : 'text-gray-500'}`} />
+                        <span>{recheckingIndex === idx ? 'Re-checking Privy...' : 'Check 10k Privy Again'}</span>
+                      </button>
+                    </div>
+
+                    <div className="text-xs text-gray-600 font-sans space-y-1">
+                      <p>
+                        {wallet.privyError ? (
+                          <span className="text-amber-700 font-medium">
+                            Connection notice: {wallet.privyError}. Click &quot;Check 10k Privy Again&quot; above to retry.
+                          </span>
+                        ) : wallet.isNewUser ? (
+                          <span>
+                            Privy reports this specific Phantom address was never connected to 10k.world (no embedded wallet was created on Privy for this account).
+                          </span>
+                        ) : (
+                          <span>
+                            No internal 10k embedded wallet was found linked to this Phantom address on Privy.
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-[11px] text-gray-400">
+                        Note: Your Phantom wallet for this account is already 100% recovered above with its private key.
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
