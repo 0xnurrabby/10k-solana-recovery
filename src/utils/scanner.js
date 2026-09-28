@@ -350,7 +350,7 @@ export async function scanSubWallets({
   const connection = new Connection(rpcUrl, 'confirmed');
   const allActiveWallets = [];
 
-  // 1. Process directly provided Private Keys (Pic 2 format) in parallel!
+  // 1. Process directly provided Private Keys (Pic 2 format) in 50x parallel!
   if (privateKeys.length > 0) {
     const concurrencyLimit = Math.min(concurrency, privateKeys.length);
     let nextIndex = 0;
@@ -375,10 +375,11 @@ export async function scanSubWallets({
 
         let signatures = [];
         try {
-          signatures = await connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 });
-        } catch (err) {
-          // If public RPC throttles, do not block the worker
-        }
+          signatures = await Promise.race([
+            connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+          ]);
+        } catch {}
 
         const txDates = (signatures || [])
           .filter((s) => s.blockTime)
@@ -438,7 +439,7 @@ export async function scanSubWallets({
     const seed = Buffer.from(bip39.mnemonicToSeedSync(currentPhrase));
     let consecutiveEmpty = 0;
     let accountIndex = 0;
-    const batchSize = Math.min(concurrency, 5);
+    const batchSize = Math.min(concurrency, 20);
 
     while (consecutiveEmpty < gapLimit) {
       if (cancelSignal && cancelSignal.isCancelled) break;

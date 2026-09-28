@@ -351,8 +351,8 @@ export function BatchRecovery({ onCopy, onError }) {
               Paste numbered seed phrases (1., 2.), multi-line notes, or raw Base58 private keys.
             </p>
           </div>
-          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-[11px] font-mono font-bold text-emerald-800">
-            50x Turbo Concurrency
+          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-mono font-bold">
+            50x Concurrency
           </span>
         </div>
 
