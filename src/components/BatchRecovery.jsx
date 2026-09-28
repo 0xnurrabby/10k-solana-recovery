@@ -207,20 +207,49 @@ export function BatchRecovery({ onCopy, onError }) {
     }
   };
 
+  const closePrivyModalDialog = () => {
+    try {
+      const closeBtn = document.querySelector(
+        'button[data-component-id="sc-9b65f2b6-1"], button[aria-label*="lose"], [class*="CloseButton"], div[role="dialog"] button'
+      );
+      if (closeBtn) {
+        closeBtn.click();
+        return true;
+      }
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+        })
+      );
+    } catch (e) {
+      console.warn('Auto close dialog notice:', e);
+    }
+    return false;
+  };
+
   const checkAndCaptureClipboard = async (index) => {
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
         const text = await navigator.clipboard.readText();
         const cleaned = text?.trim();
         if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
+          let wasCaptured = false;
           setDiscoveredWallets((prev) => {
             const next = [...prev];
-            if (next[index]) {
+            if (next[index] && next[index].exported10kKey !== cleaned) {
               next[index] = { ...next[index], exported10kKey: cleaned };
+              wasCaptured = true;
             }
             return next;
           });
-          if (onCopy) onCopy(`Captured 10k private key for ${discoveredWallets[index]?.label || `Account ${index + 1}`}!`);
+          if (wasCaptured) {
+            if (onCopy) onCopy(`Captured 10k private key for Account ${index + 1}!`);
+            closePrivyModalDialog();
+          }
           return true;
         }
       }
@@ -229,6 +258,15 @@ export function BatchRecovery({ onCopy, onError }) {
     }
     return false;
   };
+
+  // Poll clipboard while modal is open so clicking Copy key instantly auto-captures and closes modal
+  useEffect(() => {
+    if (exportingIndex === null) return;
+    const interval = setInterval(() => {
+      checkAndCaptureClipboard(exportingIndex);
+    }, 500);
+    return () => clearInterval(interval);
+  }, [exportingIndex]);
 
   // State Machine for Privy Session & Modal Export
   // Stage 1: Initialize export session and verify current authentication
@@ -866,6 +904,23 @@ export function BatchRecovery({ onCopy, onError }) {
             </div>
           )}
         </div>
+
+        {/* Active Batch Export Guidance Banner */}
+        {isBatchExporting && (
+          <div className="p-4 rounded-2xl bg-amber-50/90 border border-amber-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 font-sans shadow-xs">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>10K Privy Secure Export Active:</strong> Please click <strong>&quot;Copy key&quot;</strong> in each modal. The tool will auto-close the modal, save the real 10K key, and auto-download the .txt file once complete.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="px-2.5 py-1 rounded-full bg-amber-200/80 font-mono font-bold text-amber-950 text-[11px]">
+                {discoveredWallets.filter((w) => w.exported10kKey).length}/{discoveredWallets.filter((w) => w.embeddedWalletAddress).length} Captured
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Live Scan Status & Activity */}
         {isScanning && scanProgress && (
