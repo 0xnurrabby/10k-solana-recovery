@@ -48,6 +48,12 @@ export function BatchRecovery({ onCopy, onError }) {
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
   const lastCapturedKeyRef = useRef(null);
+  const exportingIndexRef = useRef(exportingIndex);
+  exportingIndexRef.current = exportingIndex;
+  const discoveredWalletsRef = useRef(discoveredWallets);
+  discoveredWalletsRef.current = discoveredWallets;
+  const captured10kKeysRef = useRef(new Map());
+  const currentCaptureResolverRef = useRef(null);
 
   const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
@@ -222,36 +228,89 @@ export function BatchRecovery({ onCopy, onError }) {
 
   const closePrivyModalDialog = () => {
     try {
-      // Privy export modal close button matches button[aria-label="close modal"] or componentId sc-e033e17a-0
+      // 1. Target Privy close modal button
       const closeBtn = document.querySelector(
-        'button[aria-label="close modal"], button[data-component-id="sc-e033e17a-0"], button[aria-label*="close" i], button[aria-label*="lose" i], [class*="CloseButton"], button[data-component-id="sc-9b65f2b6-1"]'
+        'button[aria-label="close modal"], button[data-component-id="sc-e033e17a-0"], button[aria-label*="close" i], button[aria-label*="dismiss" i], button[aria-label*="lose" i], [class*="CloseButton"], button[data-component-id="sc-9b65f2b6-1"]'
       );
       if (closeBtn) {
         closeBtn.click();
-        return true;
       }
-      const dialog = document.querySelector('div[role="dialog"]');
-      if (dialog) {
-        const dialogClose = dialog.querySelector('button[aria-label*="close" i], button:has(svg)');
-        if (dialogClose) {
-          dialogClose.click();
-          return true;
-        }
-        window.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Escape',
-            code: 'Escape',
-            keyCode: 27,
-            which: 27,
-            bubbles: true,
-          })
-        );
-        return true;
+
+      // 2. Dispatch escape key event
+      const escEvent = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        keyCode: 27,
+        which: 27,
+        bubbles: true,
+        cancelable: true,
+      });
+      window.dispatchEvent(escEvent);
+      document.dispatchEvent(escEvent);
+      document.body?.dispatchEvent(escEvent);
+
+      // 3. Target backdrop
+      const backdrop = document.querySelector(
+        '#privy-backdrop, [data-privy-backdrop], div[data-component-id="sc-311ca443-2"]'
+      );
+      if (backdrop) {
+        backdrop.click();
       }
+      return true;
     } catch (e) {
       console.warn('Auto close dialog notice:', e);
     }
     return false;
+  };
+
+  const ensureModalClosed = async (maxWaitMs = 500) => {
+    closePrivyModalDialog();
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const dialog = document.querySelector('div[role="dialog"], button[aria-label="close modal"]');
+      if (!dialog) break;
+      closePrivyModalDialog();
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  };
+
+  const handleCapturedKeyDirectly = (key, forcedIndex = null) => {
+    const targetIdx = forcedIndex !== null ? forcedIndex : exportingIndexRef.current;
+    if (targetIdx === null || targetIdx === undefined) return false;
+
+    const cleaned = key?.trim();
+    if (!cleaned || cleaned.length < 40 || cleaned.length > 90 || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
+      return false;
+    }
+
+    if (lastCapturedKeyRef.current === cleaned && captured10kKeysRef.current.get(targetIdx) === cleaned) {
+      return false;
+    }
+
+    lastCapturedKeyRef.current = cleaned;
+    captured10kKeysRef.current.set(targetIdx, cleaned);
+
+    setDiscoveredWallets((prev) => {
+      const next = [...prev];
+      if (next[targetIdx] && next[targetIdx].exported10kKey !== cleaned) {
+        next[targetIdx] = { ...next[targetIdx], exported10kKey: cleaned };
+      }
+      return next;
+    });
+
+    if (currentCaptureResolverRef.current) {
+      currentCaptureResolverRef.current(cleaned);
+      currentCaptureResolverRef.current = null;
+    }
+
+    const accLabel = discoveredWalletsRef.current[targetIdx]?.label || `Account ${targetIdx + 1}`;
+    if (onCopy) {
+      onCopy(`Captured key for ${accLabel}! Next wallet loading...`);
+    }
+
+    // Instantly close modal upon copy
+    closePrivyModalDialog();
+    return true;
   };
 
   const checkAndCaptureClipboard = async (index) => {
@@ -260,48 +319,64 @@ export function BatchRecovery({ onCopy, onError }) {
         const text = await navigator.clipboard.readText();
         const cleaned = text?.trim();
         if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
-          // If this key is identical to the last captured key, it's leftover in clipboard from prior account
-          if (cleaned === lastCapturedKeyRef.current) {
-            return false;
-          }
-
-          let wasCaptured = false;
-          setDiscoveredWallets((prev) => {
-            const next = [...prev];
-            const alreadyUsedByOther = next.some((w, idx) => idx !== index && w.exported10kKey === cleaned);
-            if (alreadyUsedByOther) {
-              return prev;
-            }
-
-            if (next[index] && next[index].exported10kKey !== cleaned) {
-              next[index] = { ...next[index], exported10kKey: cleaned };
-              lastCapturedKeyRef.current = cleaned;
-              wasCaptured = true;
-            }
-            return next;
-          });
-
-          if (wasCaptured) {
-            if (onCopy) onCopy(`Captured 10k key for Account ${index + 1}! Next wallet loading...`);
-            setTimeout(() => {
-              closePrivyModalDialog();
-            }, 120);
-          }
-          return true;
+          return handleCapturedKeyDirectly(cleaned, index);
         }
       }
-    } catch (e) {
-      console.log('Clipboard auto-read notice:', e);
-    }
+    } catch (e) {}
     return false;
   };
 
-  // Poll clipboard while modal is open so clicking Copy key instantly auto-captures and closes modal
+  // Intercept navigator.clipboard.writeText so that when Privy copies the key, it is captured at 0ms
+  useEffect(() => {
+    if (typeof window === 'undefined' || !navigator?.clipboard?.writeText) return;
+
+    const originalWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+
+    navigator.clipboard.writeText = async (text) => {
+      try {
+        const cleaned = text?.trim();
+        if (cleaned && cleaned.length >= 40 && cleaned.length <= 90 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(cleaned)) {
+          handleCapturedKeyDirectly(cleaned);
+        }
+      } catch (err) {
+        console.warn('Intercept writeText notice:', err);
+      }
+      return originalWriteText(text);
+    };
+
+    return () => {
+      navigator.clipboard.writeText = originalWriteText;
+    };
+  }, []);
+
+  // Global click listener for "Copy key" button to instantly trigger capture and close
+  useEffect(() => {
+    const handleGlobalClick = (e) => {
+      const btn = e.target?.closest?.('button');
+      if (!btn) return;
+      const text = btn.innerText || btn.textContent || '';
+      if (text.includes('Copy key') || text.includes('Copy private key')) {
+        setTimeout(async () => {
+          if (exportingIndexRef.current !== null) {
+            await checkAndCaptureClipboard(exportingIndexRef.current);
+            closePrivyModalDialog();
+          }
+        }, 40);
+      }
+    };
+
+    document.addEventListener('click', handleGlobalClick, true);
+    return () => {
+      document.removeEventListener('click', handleGlobalClick, true);
+    };
+  }, []);
+
+  // Poll clipboard while modal is open as active fallback
   useEffect(() => {
     if (exportingIndex === null) return;
     const interval = setInterval(() => {
       checkAndCaptureClipboard(exportingIndex);
-    }, 350);
+    }, 200);
     return () => clearInterval(interval);
   }, [exportingIndex]);
 
@@ -324,7 +399,7 @@ export function BatchRecovery({ onCopy, onError }) {
       } catch (e) {
         console.warn('Logout notice:', e);
       }
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 120));
     }
 
     try {
@@ -381,21 +456,63 @@ export function BatchRecovery({ onCopy, onError }) {
       }
     }
 
-    await new Promise((r) => setTimeout(r, 200));
+    // Wait until authenticatedRef becomes true or max 2s
+    const authStart = Date.now();
+    while (Date.now() - authStart < 2000) {
+      if (authenticatedRef.current) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
     return true;
   };
 
   const waitForClipboardKey = async (walletIndex, timeoutMs = 180000) => {
     const startTime = Date.now();
+    let modalSeen = false;
+
     while (Date.now() - startTime < timeoutMs) {
       if (cancelBatchExportRef.current) return false;
+
+      if (captured10kKeysRef.current?.has(walletIndex)) {
+        return true;
+      }
+
       const captured = await checkAndCaptureClipboard(walletIndex);
       if (captured) {
         return true;
       }
-      await new Promise((r) => setTimeout(r, 150));
+
+      const hasModal = !!document.querySelector('div[role="dialog"], button[aria-label="close modal"]');
+      if (hasModal) {
+        modalSeen = true;
+      } else if (modalSeen && Date.now() - startTime > 1200) {
+        // Modal was manually closed by the user without copying
+        return false;
+      }
+
+      await new Promise((r) => setTimeout(r, 100));
     }
     return false;
+  };
+
+  const openExportModalForWallet = (wallet) => {
+    const exportFn = exportWalletRef.current || exportWalletFromHook;
+    const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
+
+    let p;
+    if (typeof exportFn === 'function') {
+      p = exportFn({ address: wallet.embeddedWalletAddress });
+    } else if (typeof solanaHook?.exportWallet === 'function') {
+      p = solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
+    } else {
+      throw new Error('Privy export wallet function is not available.');
+    }
+
+    // DO NOT await p: Privy export promise does not resolve when closed via close button
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {});
+    }
+    return p;
   };
 
   const triggerAutoDownload10kKeys = () => {
@@ -440,36 +557,39 @@ export function BatchRecovery({ onCopy, onError }) {
 
         if (cancelBatchExportRef.current) break;
 
+        // Reset resolver promise for this index
+        let resolver;
+        const keyCapturePromise = new Promise((resolve) => {
+          resolver = resolve;
+        });
+        currentCaptureResolverRef.current = resolver;
+
         if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key.`);
-        const exportFn = exportWalletRef.current || exportWalletFromHook;
-        const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
+        openExportModalForWallet(wallet);
 
-        let modalPromise;
-        if (typeof exportFn === 'function') {
-          modalPromise = exportFn({ address: wallet.embeddedWalletAddress });
-        } else if (typeof solanaHook?.exportWallet === 'function') {
-          modalPromise = solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
-        } else {
-          throw new Error('Privy export wallet function is not available.');
-        }
+        // Wait for key capture (either from writeText hook, click listener, or clipboard read)
+        await Promise.race([
+          keyCapturePromise,
+          waitForClipboardKey(index, 180000),
+        ]);
 
-        await waitForClipboardKey(index);
+        if (cancelBatchExportRef.current) break;
 
-        closePrivyModalDialog();
-        try {
-          await modalPromise;
-        } catch (e) {}
+        // Close modal immediately and ensure it is removed from DOM before opening next
+        await ensureModalClosed(400);
 
-        // Instant transition to next wallet
-        await new Promise((r) => setTimeout(r, 100));
+        // Instant yield before opening next account modal
+        await new Promise((r) => setTimeout(r, 80));
       } catch (err) {
         console.error(`Export error for ${accLabel}:`, err);
         if (onError) onError(err.message || `Export error for ${accLabel}`);
+        await ensureModalClosed(300);
       }
     }
 
     setIsBatchExporting(false);
     setExportingIndex(null);
+    closePrivyModalDialog();
     triggerAutoDownload10kKeys();
   };
 
