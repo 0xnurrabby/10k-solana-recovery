@@ -110,7 +110,7 @@ export function BatchRecovery({ onCopy, onError }) {
     try {
       const results = await scanSubWallets({
         mnemonic: parsed,
-        concurrency: 5,
+        concurrency: 50,
         cancelSignal: cancelSignalRef.current,
         onProgress: (p) => {
           if (p.status === 'scanning_key') {
@@ -351,8 +351,8 @@ export function BatchRecovery({ onCopy, onError }) {
               Paste numbered seed phrases (1., 2.), multi-line notes, or raw Base58 private keys.
             </p>
           </div>
-          <span className="px-2.5 py-0.5 rounded-full bg-gray-100 text-[11px] font-mono text-gray-600">
-            5x Concurrency
+          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-[11px] font-mono font-bold text-emerald-800">
+            50x Turbo Concurrency
           </span>
         </div>
 
@@ -504,7 +504,7 @@ export function BatchRecovery({ onCopy, onError }) {
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-gray-100 text-center">
                 <div className="text-[10px] font-mono text-gray-400 uppercase">Speed Mode</div>
-                <div className="text-base font-bold font-mono text-gray-700">5x Parallel</div>
+                <div className="text-base font-bold font-mono text-emerald-600">50x Parallel</div>
               </div>
             </div>
 

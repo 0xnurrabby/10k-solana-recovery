@@ -336,7 +336,7 @@ export async function scanSubWallets({
   rpcUrl = typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : 'https://api.mainnet-beta.solana.com',
   gapLimit = 10,
   cancelSignal = null,
-  concurrency = 5,
+  concurrency = 50,
 }) {
   const parsed = typeof mnemonic === 'object' && mnemonic !== null && (mnemonic.phrases !== undefined || mnemonic.privateKeys !== undefined)
     ? mnemonic
@@ -377,10 +377,7 @@ export async function scanSubWallets({
         try {
           signatures = await connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 });
         } catch (err) {
-          await new Promise((r) => setTimeout(r, 600));
-          try {
-            signatures = await connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 });
-          } catch {}
+          // If public RPC throttles, do not block the worker
         }
 
         const txDates = (signatures || [])
@@ -424,8 +421,6 @@ export async function scanSubWallets({
             label,
           });
         }
-
-        await new Promise((r) => setTimeout(r, 100));
       }
     }
 
