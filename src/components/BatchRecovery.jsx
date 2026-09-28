@@ -25,7 +25,8 @@ import {
   Key,
   FolderCheck,
   CheckCircle2,
-  X
+  X,
+  Clock
 } from 'lucide-react';
 import { scanSubWallets, toBase64, parseRecoveryInput, authenticateSubAccountWithPrivy } from '../utils/scanner';
 
@@ -45,11 +46,15 @@ export function BatchRecovery({ onCopy, onError }) {
   const [exportSession, setExportSession] = useState(null);
   const [batchQueue, setBatchQueue] = useState([]);
   const [exportCompleteModal, setExportCompleteModal] = useState(null);
+  const [exportIntervalSeconds, setExportIntervalSeconds] = useState(10);
+  const [countdownRemaining, setCountdownRemaining] = useState(null);
 
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
   const lastCapturedKeyRef = useRef(null);
   const batchQueueRef = useRef([]);
+  const intervalSecondsRef = useRef(10);
+  const countdownTimerRef = useRef(null);
 
   const { ready, authenticated, user, logout } = usePrivy();
   const { loginWithSiws } = useLoginWithSiws();
@@ -509,6 +514,11 @@ export function BatchRecovery({ onCopy, onError }) {
   const handleFinishSession = (proceedWithBatch = true) => {
     setExportSession(null);
     setExportingIndex(null);
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdownRemaining(null);
 
     if (!proceedWithBatch || cancelBatchExportRef.current) {
       setIsBatchExporting(false);
@@ -522,19 +532,42 @@ export function BatchRecovery({ onCopy, onError }) {
       batchQueueRef.current = batchQueueRef.current.slice(1);
       setBatchQueue(batchQueueRef.current);
 
-      setTimeout(() => {
-        if (cancelBatchExportRef.current) return;
-        setExportingIndex(nextItem.index);
-        setExportSession({
-          wallet: nextItem.wallet,
-          index: nextItem.index,
-          isBatch: true,
-          stage: 'init',
-        });
-      }, 500);
+      const delaySeconds = Math.max(1, intervalSecondsRef.current || 10);
+      let remaining = delaySeconds;
+      setCountdownRemaining(remaining);
+
+      countdownTimerRef.current = setInterval(() => {
+        if (cancelBatchExportRef.current) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+          setCountdownRemaining(null);
+          setIsBatchExporting(false);
+          return;
+        }
+
+        remaining -= 1;
+        setCountdownRemaining(remaining);
+
+        if (remaining <= 0) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+          setCountdownRemaining(null);
+
+          if (!cancelBatchExportRef.current) {
+            setExportingIndex(nextItem.index);
+            setExportSession({
+              wallet: nextItem.wallet,
+              index: nextItem.index,
+              isBatch: true,
+              stage: 'init',
+            });
+          }
+        }
+      }, 1000);
     } else {
       setIsBatchExporting(false);
       setBatchQueue([]);
+      setCountdownRemaining(null);
       setTimeout(() => {
         triggerAutoDownload10kKeys();
       }, 500);
@@ -616,6 +649,11 @@ export function BatchRecovery({ onCopy, onError }) {
   const handleStopBatchExport = () => {
     cancelBatchExportRef.current = true;
     setIsBatchExporting(false);
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdownRemaining(null);
     batchQueueRef.current = [];
     setBatchQueue([]);
     setExportSession(null);
@@ -953,20 +991,47 @@ export function BatchRecovery({ onCopy, onError }) {
                 <Download className="w-3.5 h-3.5" />
                 <span>Export JSON ({discoveredWallets.length})</span>
               </button>
+              {/* Export Interval / Auto-Click Timer Selector */}
+              <div className="flex items-center gap-1.5 px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-xs">
+                <Clock className="w-3.5 h-3.5 text-gray-500" />
+                <span className="text-gray-600 font-medium whitespace-nowrap">Interval:</span>
+                <select
+                  disabled={isBatchExporting}
+                  value={exportIntervalSeconds}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setExportIntervalSeconds(val);
+                    intervalSecondsRef.current = val;
+                  }}
+                  className="bg-transparent font-semibold text-gray-900 cursor-pointer focus:outline-hidden text-xs py-0.5"
+                  title="Delay between wallets for Auto Clicker synchronization"
+                >
+                  <option value={10}>10s (Auto-Clicker Recommended)</option>
+                  <option value={5}>5s (Fast)</option>
+                  <option value={8}>8s (Balanced)</option>
+                  <option value={15}>15s (Relaxed)</option>
+                </select>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Active Batch Export Guidance Banner */}
+        {/* Active Batch Export Guidance Banner with Live Countdown */}
         {isBatchExporting && (
           <div className="p-4 rounded-2xl bg-amber-50/90 border border-amber-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 font-sans shadow-xs">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
               <span>
-                <strong>10K Privy Secure Export Active:</strong> Please click <strong>&quot;Copy key&quot;</strong> in each modal. The tool will auto-close the modal, save the real 10K key, and auto-download the .txt file once complete.
+                <strong>10K Privy Secure Export Active:</strong> Set your Auto-Clicker on <strong>&quot;Copy key&quot;</strong>. The next wallet will open cleanly every <strong>{exportIntervalSeconds}s</strong>.
               </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {countdownRemaining !== null && countdownRemaining > 0 && (
+                <span className="px-3 py-1 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-mono font-bold text-xs inline-flex items-center gap-1.5 animate-pulse">
+                  <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Next wallet in: {countdownRemaining}s</span>
+                </span>
+              )}
               <span className="px-2.5 py-1 rounded-full bg-amber-200/80 font-mono font-bold text-amber-950 text-[11px]">
                 {discoveredWallets.filter((w) => w.exported10kKey).length}/{discoveredWallets.filter((w) => w.embeddedWalletAddress).length} Captured
               </span>
