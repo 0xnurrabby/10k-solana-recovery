@@ -1,9 +1,11 @@
 import * as bip39 from '@scure/bip39';
+import { wordlist } from '@scure/bip39/wordlists/english';
 import { derivePath } from 'ed25519-hd-key';
 import { Keypair, Connection, PublicKey } from '@solana/web3.js';
 import nacl from 'tweetnacl';
 
 const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const bip39WordSet = new Set(wordlist);
 
 export function encodeBase58(source) {
   if (!source || source.length === 0) return '';
@@ -26,6 +28,32 @@ export function encodeBase58(source) {
     digits.push(0);
   }
   return digits.reverse().map((d) => ALPHABET[d]).join('');
+}
+
+export function decodeBase58(string) {
+  if (!string || string.length === 0) return new Uint8Array(0);
+  const bytes = [0];
+  for (let i = 0; i < string.length; i++) {
+    const c = string[i];
+    const value = ALPHABET.indexOf(c);
+    if (value === -1) throw new Error(`Invalid Base58 char: ${c}`);
+    for (let j = 0; j < bytes.length; j++) bytes[j] *= 58;
+    bytes[0] += value;
+    let carry = 0;
+    for (let k = 0; k < bytes.length; k++) {
+      bytes[k] += carry;
+      carry = bytes[k] >> 8;
+      bytes[k] &= 0xff;
+    }
+    while (carry) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  for (let i = 0; string[i] === '1' && i < string.length - 1; i++) {
+    bytes.push(0);
+  }
+  return new Uint8Array(bytes.reverse());
 }
 
 export function toBase64(bytes) {
@@ -126,25 +154,171 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
   }
 }
 
-export function parsePhrases(rawInput) {
-  if (!rawInput) return [];
-  const rawLines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+export function parseRecoveryInput(rawInput) {
+  if (!rawInput || typeof rawInput !== 'string') return { phrases: [], privateKeys: [] };
+
   const phrases = [];
+  const privateKeys = [];
+  const seenPrivateKeys = new Set();
+  const seenPhrases = new Set();
 
-  for (const line of rawLines) {
-    const words = line.split(/\s+/).filter(Boolean);
-    if (words.length >= 12) {
-      phrases.push(words.join(' '));
+  // 1. JSON array private keys (e.g. [123, 45, 67...])
+  const jsonMatches = rawInput.match(/\[\s*(?:\d+\s*,\s*){31,63}\d+\s*\]/g);
+  if (jsonMatches) {
+    for (const match of jsonMatches) {
+      try {
+        const arr = JSON.parse(match);
+        if (arr.length === 64 || arr.length === 32) {
+          const bytes = new Uint8Array(arr);
+          const keypair = arr.length === 64 ? Keypair.fromSecretKey(bytes) : Keypair.fromSeed(bytes);
+          const pk = keypair.publicKey.toBase58();
+          if (!seenPrivateKeys.has(pk)) {
+            seenPrivateKeys.add(pk);
+            privateKeys.push({
+              keypair,
+              secretKeyBytes: bytes,
+              secretKeyBase58: encodeBase58(keypair.secretKey),
+              phantomAddress: pk,
+              rawInput: match,
+            });
+          }
+        }
+      } catch (e) {}
     }
   }
 
+  // 2. Base58 private keys (Solana secret keys are ~87-88 chars in base58)
+  const base58Candidates = rawInput.match(/[1-9A-HJ-NP-Za-km-z]{40,90}/g) || [];
+  for (const candidate of base58Candidates) {
+    try {
+      const bytes = decodeBase58(candidate);
+      if (bytes.length === 64) {
+        const keypair = Keypair.fromSecretKey(bytes);
+        const pk = keypair.publicKey.toBase58();
+        if (!seenPrivateKeys.has(pk)) {
+          seenPrivateKeys.add(pk);
+          privateKeys.push({
+            keypair,
+            secretKeyBytes: bytes,
+            secretKeyBase58: candidate,
+            phantomAddress: pk,
+            rawInput: candidate,
+          });
+        }
+      } else if (bytes.length === 32) {
+        const keypair = Keypair.fromSeed(bytes);
+        const pk = keypair.publicKey.toBase58();
+        if (!seenPrivateKeys.has(pk)) {
+          seenPrivateKeys.add(pk);
+          privateKeys.push({
+            keypair,
+            secretKeyBytes: bytes,
+            secretKeyBase58: encodeBase58(keypair.secretKey),
+            phantomAddress: pk,
+            rawInput: candidate,
+          });
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 3. Check for wrapped base58 lines (e.g. copied from notes or terminal with soft line breaks)
+  const lines = rawInput.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  let currentBuffer = '';
+  for (const line of lines) {
+    if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(line)) {
+      currentBuffer = '';
+      continue;
+    }
+    currentBuffer += line;
+    if (currentBuffer.length >= 85 && currentBuffer.length <= 90) {
+      try {
+        const bytes = decodeBase58(currentBuffer);
+        if (bytes.length === 64) {
+          const keypair = Keypair.fromSecretKey(bytes);
+          const pk = keypair.publicKey.toBase58();
+          if (!seenPrivateKeys.has(pk)) {
+            seenPrivateKeys.add(pk);
+            privateKeys.push({
+              keypair,
+              secretKeyBytes: bytes,
+              secretKeyBase58: currentBuffer,
+              phantomAddress: pk,
+              rawInput: currentBuffer,
+            });
+          }
+          currentBuffer = '';
+        }
+      } catch (e) {}
+    } else if (currentBuffer.length > 90) {
+      currentBuffer = '';
+    }
+  }
+
+  // 4. Mnemonic seed phrases (BIP39 12/24 words)
+  // Check numbered sections (e.g. "1.\n words...", "2.\n words...")
+  const numberedSections = rawInput.split(/(?:^|\n)\s*(?:\d+[\.\)\:\-]|#\d+[\:\-]?|Phrase\s*\d+[\:\-]|\bAccount\s*\d+[\:\-])\s*/i);
+
+  for (const section of numberedSections) {
+    const trimmed = section.trim();
+    if (!trimmed) continue;
+    const tokens = trimmed.toLowerCase().match(/[a-z]+/g) || [];
+    const bipWords = tokens.filter((t) => bip39WordSet.has(t));
+    if (bipWords.length >= 12) {
+      let i = 0;
+      while (i + 12 <= bipWords.length) {
+        if (i + 24 <= bipWords.length) {
+          const phrase24 = bipWords.slice(i, i + 24).join(' ');
+          if (bip39.validateMnemonic(phrase24, wordlist)) {
+            if (!seenPhrases.has(phrase24)) {
+              seenPhrases.add(phrase24);
+              phrases.push(phrase24);
+            }
+            i += 24;
+            continue;
+          }
+        }
+        const phrase12 = bipWords.slice(i, i + 12).join(' ');
+        if (!seenPhrases.has(phrase12)) {
+          seenPhrases.add(phrase12);
+          phrases.push(phrase12);
+        }
+        i += 12;
+      }
+    }
+  }
+
+  // Fallback: tokenize entire input for BIP39 words if numbered split found nothing
   if (phrases.length === 0) {
-    const allWords = rawInput.trim().split(/\s+/).filter(Boolean);
-    if (allWords.length >= 12) {
-      phrases.push(allWords.join(' '));
+    const allTokens = rawInput.toLowerCase().match(/[a-z]+/g) || [];
+    const bipWords = allTokens.filter((t) => bip39WordSet.has(t));
+    let i = 0;
+    while (i + 12 <= bipWords.length) {
+      if (i + 24 <= bipWords.length) {
+        const phrase24 = bipWords.slice(i, i + 24).join(' ');
+        if (bip39.validateMnemonic(phrase24, wordlist)) {
+          if (!seenPhrases.has(phrase24)) {
+            seenPhrases.add(phrase24);
+            phrases.push(phrase24);
+          }
+          i += 24;
+          continue;
+        }
+      }
+      const phrase12 = bipWords.slice(i, i + 12).join(' ');
+      if (!seenPhrases.has(phrase12)) {
+        seenPhrases.add(phrase12);
+        phrases.push(phrase12);
+      }
+      i += 12;
     }
   }
 
+  return { phrases, privateKeys };
+}
+
+export function parsePhrases(rawInput) {
+  const { phrases } = parseRecoveryInput(rawInput);
   return phrases;
 }
 
@@ -155,12 +329,115 @@ export async function scanSubWallets({
   gapLimit = 10,
   cancelSignal = null,
 }) {
-  const phrases = Array.isArray(mnemonic) ? mnemonic : parsePhrases(mnemonic);
-  if (phrases.length === 0) return [];
+  const parsed = typeof mnemonic === 'object' && mnemonic !== null && (mnemonic.phrases !== undefined || mnemonic.privateKeys !== undefined)
+    ? mnemonic
+    : parseRecoveryInput(mnemonic);
+
+  const phrases = parsed.phrases || [];
+  const privateKeys = parsed.privateKeys || [];
+
+  if (phrases.length === 0 && privateKeys.length === 0) return [];
 
   const connection = new Connection(rpcUrl, 'confirmed');
   const allActiveWallets = [];
 
+  // 1. Process directly provided Private Keys (from Pic 2 format)
+  for (let kIdx = 0; kIdx < privateKeys.length; kIdx++) {
+    if (cancelSignal && cancelSignal.isCancelled) break;
+
+    const item = privateKeys[kIdx];
+    const label = privateKeys.length > 1 ? `Key ${kIdx + 1}` : 'Private Key 1';
+
+    if (onProgress) {
+      onProgress({
+        status: 'scanning_key',
+        keyIndex: kIdx + 1,
+        totalKeys: privateKeys.length,
+        phantomAddress: item.phantomAddress,
+        totalFound: allActiveWallets.length,
+        label,
+      });
+    }
+
+    let signatures = [];
+    let attempts = 0;
+    while (attempts < 3) {
+      try {
+        attempts++;
+        signatures = await connection.getSignaturesForAddress(item.keypair.publicKey, { limit: 10 });
+        break;
+      } catch (err) {
+        console.warn(`RPC attempt ${attempts} failed for ${label}:`, err.message);
+        if (attempts < 3) {
+          if (onProgress) {
+            onProgress({
+              status: 'retrying',
+              label,
+              attempt: attempts,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 1200 * attempts));
+        }
+      }
+    }
+
+    const txDates = signatures
+      .filter((s) => s.blockTime)
+      .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
+
+    const hasJun2025Tx = signatures.some((sig) => {
+      if (!sig.blockTime) return false;
+      const d = new Date(sig.blockTime * 1000);
+      return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
+    });
+
+    if (onProgress) {
+      onProgress({
+        status: 'authenticating',
+        keyIndex: kIdx + 1,
+        phantomAddress: item.phantomAddress,
+        txCount: signatures.length,
+        hasJun2025Tx,
+        label,
+      });
+    }
+
+    // Authenticate with Privy via SIWS
+    const privyResult = await authenticateSubAccountWithPrivy(item.keypair, item.phantomAddress);
+
+    const walletInfo = {
+      type: 'private_key',
+      keyIndex: kIdx + 1,
+      accountIndex: kIdx + 1,
+      label,
+      derivationPath: 'Direct Private Key',
+      phantomAddress: item.phantomAddress,
+      secretKeyBase58: item.secretKeyBase58,
+      keypair: item.keypair,
+      txCount: signatures.length,
+      txDates,
+      hasJun2025Tx,
+      embeddedWalletAddress: privyResult.embeddedWalletAddress || null,
+      privyMessage: privyResult.message || null,
+      privySignature: privyResult.signature || null,
+      privyUserId: privyResult.user?.id || null,
+    };
+
+    allActiveWallets.push(walletInfo);
+
+    if (onProgress) {
+      onProgress({
+        status: 'found',
+        wallet: walletInfo,
+        totalFound: allActiveWallets.length,
+        label,
+      });
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  // 2. Process Seed Phrases (from Pic 1 format)
   for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
     if (cancelSignal && cancelSignal.isCancelled) break;
 
@@ -221,7 +498,7 @@ export async function scanSubWallets({
         }
       }
 
-      // If all attempts failed due to network/RPC error, retry once after a longer delay rather than counting as empty
+      // If all attempts failed due to network/RPC error, retry once after a delay
       if (!fetchSuccess) {
         console.warn(`RPC error for ${label}. Retrying once after delay...`);
         await new Promise((r) => setTimeout(r, 2000));
@@ -229,7 +506,6 @@ export async function scanSubWallets({
           signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
           fetchSuccess = true;
         } catch (e) {
-          // Still failed: skip without incrementing consecutiveEmpty to avoid false stops
           accountIndex++;
           continue;
         }
@@ -265,7 +541,7 @@ export async function scanSubWallets({
       const hasJun2025Tx = signatures.some((sig) => {
         if (!sig.blockTime) return false;
         const d = new Date(sig.blockTime * 1000);
-        return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5); // May or June 2025
+        return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
       });
 
       if (onProgress) {
@@ -285,6 +561,7 @@ export async function scanSubWallets({
       const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
 
       const walletInfo = {
+        type: 'derived_account',
         phraseIndex: pIdx + 1,
         accountIndex: accountIndex + 1,
         label,
