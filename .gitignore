@@ -25,17 +25,13 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Vercel
-.vercel
-
 # Environment
 .env
 .env.*
 !.env.example
 
-# Temporary test scripts
+# Temporary test scripts and generated reports
 test_*.mjs
 bridge_server.mjs
+recovered_*.json
 scratch/
-
-.vercel
