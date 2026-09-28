@@ -223,6 +223,26 @@ export function BatchRecovery({ onCopy, onError }) {
     return false;
   };
 
+  const clearPrivyStorage = () => {
+    try {
+      const toRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.toLowerCase().includes('privy')) toRemove.push(k);
+      }
+      toRemove.forEach((k) => localStorage.removeItem(k));
+
+      const toRemoveSession = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.toLowerCase().includes('privy')) toRemoveSession.push(k);
+      }
+      toRemoveSession.forEach((k) => sessionStorage.removeItem(k));
+    } catch (e) {
+      console.warn('Storage clear notice:', e);
+    }
+  };
+
   const handleExportWallet = async (wallet, index) => {
     if (!wallet.embeddedWalletAddress) {
       if (onError) onError('No 10k embedded wallet found for this account.');
@@ -234,7 +254,7 @@ export function BatchRecovery({ onCopy, onError }) {
       const accLabel = wallet.label || `Account ${wallet.accountIndex}`;
       if (onCopy) onCopy(`Authenticating session for ${accLabel}...`);
 
-      // Check if Privy is currently logged in with this sub-account
+      // Check if Privy is currently logged in with this exact sub-account
       const isAlreadyCurrentAccount =
         authenticated &&
         user?.linkedAccounts?.some(
@@ -242,18 +262,16 @@ export function BatchRecovery({ onCopy, onError }) {
         );
 
       if (!isAlreadyCurrentAccount) {
-        // If logged into a different account, log out first to switch sessions cleanly
-        if (authenticated) {
-          if (onCopy) onCopy(`Switching session to ${accLabel}...`);
-          try {
-            await logout();
-            await new Promise((r) => setTimeout(r, 400));
-          } catch (logoutErr) {
-            console.warn('Logout notice:', logoutErr);
-          }
-        }
+        // Unconditionally log out previous session and wipe storage to prevent "Another user has already linked this account"
+        if (onCopy) onCopy(`Preparing clean session for ${accLabel}...`);
+        try {
+          await logout();
+        } catch (e) {}
 
-        // Fetch fresh SIWS nonce with credentials: omit so no lingering cookies interfere
+        clearPrivyStorage();
+        await new Promise((r) => setTimeout(r, 400));
+
+        // Fetch fresh SIWS nonce with credentials: omit
         const initRes = await fetch('/privy-auth/api/v1/siws/init', {
           method: 'POST',
           headers: {
@@ -297,7 +315,6 @@ export function BatchRecovery({ onCopy, onError }) {
             signature: signatureBase64,
           });
         } catch (siwsErr) {
-          // If already authenticated, proceed without throwing
           if (!siwsErr?.message?.includes('already authenticated')) {
             throw siwsErr;
           }
@@ -403,7 +420,27 @@ export function BatchRecovery({ onCopy, onError }) {
     }
 
     setIsBatchExporting(false);
-    if (onCopy) onCopy('Sequential export completed! Click "Export 10K Keys (.txt)" to download all captured keys.');
+
+    // Automatically download all captured keys once finished
+    setTimeout(() => {
+      setDiscoveredWallets((current) => {
+        const captured = current.map((w) => w.exported10kKey).filter(Boolean);
+        if (captured.length > 0) {
+          const txtContent = captured.join('\n') + '\n';
+          const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = '10k_embedded_private_keys.txt';
+          a.click();
+          URL.revokeObjectURL(url);
+          if (onCopy) onCopy(`Export finished! Auto-downloaded ${captured.length} 10K keys (.txt)`);
+        } else {
+          if (onCopy) onCopy('Sequential export completed.');
+        }
+        return current;
+      });
+    }, 600);
   };
 
   const handleRecheckPrivy = async (wallet, index) => {
@@ -453,8 +490,14 @@ export function BatchRecovery({ onCopy, onError }) {
       .filter(Boolean);
 
     if (capturedKeys.length === 0) {
+      const has10k = discoveredWallets.some((w) => w.embeddedWalletAddress);
+      if (has10k) {
+        if (onCopy) onCopy('Starting Auto-Export for your 10K embedded wallets... Please copy keys inside modal.');
+        handleBatchExportAll();
+        return;
+      }
       if (onError) {
-        onError('No 10K private keys captured yet. Click "Export Private Key" on each account (or "Batch Export 10K Keys") to unlock and capture them first.');
+        onError('No 10K embedded wallets found to export.');
       }
       return;
     }

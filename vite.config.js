@@ -18,6 +18,8 @@ const proxyConfig = {
         proxyReq.setHeader('origin', 'https://10k.world');
         proxyReq.setHeader('referer', 'https://10k.world/');
         proxyReq.setHeader('host', 'auth.privy.io');
+        proxyReq.removeHeader('cookie');
+        proxyReq.removeHeader('authorization');
       });
     },
   },
