@@ -56,7 +56,7 @@ export function BatchRecovery({ onCopy, onError }) {
   const currentCaptureResolverRef = useRef(null);
 
   const { ready, authenticated, user, logout } = usePrivy();
-  const { loginWithSiws } = useLoginWithSiws();
+  const { generateSiwsMessage, loginWithSiws } = useLoginWithSiws();
   const solanaWalletsHook = useSolanaWallets();
   const { exportWallet: exportWalletFromHook } = useExportWallet();
 
@@ -73,6 +73,8 @@ export function BatchRecovery({ onCopy, onError }) {
   logoutRef.current = logout;
   const loginWithSiwsRef = useRef(loginWithSiws);
   loginWithSiwsRef.current = loginWithSiws;
+  const generateSiwsMessageRef = useRef(generateSiwsMessage);
+  generateSiwsMessageRef.current = generateSiwsMessage;
 
   const detected = parseRecoveryInput(mnemonic);
   const detectedPhrases = detected.phrases;
@@ -423,51 +425,51 @@ export function BatchRecovery({ onCopy, onError }) {
       }
     }
 
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith('privy:')) localStorage.removeItem(k);
+    let message = '';
+    if (typeof generateSiwsMessageRef.current === 'function') {
+      try {
+        message = await generateSiwsMessageRef.current({ address: targetWallet.phantomAddress });
+      } catch (genErr) {
+        console.warn('generateSiwsMessage fallback to API:', genErr);
       }
-      for (let i = sessionStorage.length - 1; i >= 0; i--) {
-        const k = sessionStorage.key(i);
-        if (k && k.startsWith('privy:')) sessionStorage.removeItem(k);
-      }
-    } catch (e) {}
-
-    const initRes = await fetch('/privy-auth/api/v1/siws/init', {
-      method: 'POST',
-      headers: {
-        'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-        'content-type': 'application/json',
-      },
-      credentials: 'omit',
-      body: JSON.stringify({ address: targetWallet.phantomAddress }),
-    });
-
-    if (!initRes.ok) {
-      const errText = await initRes.text();
-      throw new Error(`SIWS init failed (${initRes.status}): ${errText}`);
     }
 
-    const initData = await initRes.json();
-    const nonce = initData?.nonce;
-    if (!nonce) throw new Error('Failed to retrieve authentication nonce from Privy');
+    if (!message) {
+      const initRes = await fetch('/privy-auth/api/v1/siws/init', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        credentials: 'omit',
+        body: JSON.stringify({ address: targetWallet.phantomAddress }),
+      });
 
-    const issuedAt = new Date().toISOString();
-    const message = [
-      '10k.world wants you to sign in with your Solana account:',
-      targetWallet.phantomAddress,
-      '',
-      `You are proving you own ${targetWallet.phantomAddress}.`,
-      '',
-      'URI: https://10k.world',
-      'Version: 1',
-      'Chain ID: mainnet',
-      `Nonce: ${nonce}`,
-      `Issued At: ${issuedAt}`,
-      'Resources:',
-      '- https://privy.io',
-    ].join('\n');
+      if (!initRes.ok) {
+        const errText = await initRes.text();
+        throw new Error(`SIWS init failed (${initRes.status}): ${errText}`);
+      }
+
+      const initData = await initRes.json();
+      const nonce = initData?.nonce;
+      if (!nonce) throw new Error('Failed to retrieve authentication nonce from Privy');
+
+      const issuedAt = new Date().toISOString();
+      message = [
+        '10k.world wants you to sign in with your Solana account:',
+        targetWallet.phantomAddress,
+        '',
+        `You are proving you own ${targetWallet.phantomAddress}.`,
+        '',
+        'URI: https://10k.world',
+        'Version: 1',
+        'Chain ID: mainnet',
+        `Nonce: ${nonce}`,
+        `Issued At: ${issuedAt}`,
+        'Resources:',
+        '- https://privy.io',
+      ].join('\n');
+    }
 
     const msgBytes = new TextEncoder().encode(message);
     const sig = nacl.sign.detached(msgBytes, targetWallet.keypair.secretKey);
@@ -495,10 +497,10 @@ export function BatchRecovery({ onCopy, onError }) {
       }
     }
 
-    // Wait until authenticatedRef becomes true or max 2.5s
+    // Wait until authenticatedRef becomes true AND user is loaded
     const authStart = Date.now();
-    while (Date.now() - authStart < 2500) {
-      if (authenticatedRef.current) break;
+    while (Date.now() - authStart < 3000) {
+      if (authenticatedRef.current && userRef.current) break;
       await new Promise((r) => setTimeout(r, 50));
     }
 
@@ -534,23 +536,53 @@ export function BatchRecovery({ onCopy, onError }) {
     return false;
   };
 
-  const openExportModalForWallet = (wallet) => {
+  const openExportModalForWallet = async (wallet) => {
     const exportFn = exportWalletRef.current || exportWalletFromHook;
     const solanaHook = solanaWalletsRef.current || solanaWalletsHook;
 
     let p;
-    if (typeof exportFn === 'function') {
-      p = exportFn({ address: wallet.embeddedWalletAddress });
-    } else if (typeof solanaHook?.exportWallet === 'function') {
-      p = solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
-    } else {
-      throw new Error('Privy export wallet function is not available.');
+    try {
+      if (typeof exportFn === 'function') {
+        p = exportFn({ address: wallet.embeddedWalletAddress });
+      } else if (typeof solanaHook?.exportWallet === 'function') {
+        p = solanaHook.exportWallet({ address: wallet.embeddedWalletAddress });
+      } else {
+        throw new Error('Privy export wallet function is not available.');
+      }
+    } catch (syncErr) {
+      throw syncErr;
     }
 
-    // DO NOT await p: Privy export promise does not resolve when closed via close button
+    let immediateError = null;
     if (p && typeof p.catch === 'function') {
-      p.catch(() => {});
+      p.catch((err) => {
+        immediateError = err;
+        console.warn('Privy export modal notice:', err);
+      });
     }
+
+    // Wait up to 5 seconds for modal dialog to appear in DOM
+    const checkStart = Date.now();
+    let modalOpened = false;
+    while (Date.now() - checkStart < 5000) {
+      if (immediateError) {
+        throw new Error(immediateError?.message || 'Privy export failed to initiate.');
+      }
+      const dialog = document.querySelector('div[role="dialog"], button[aria-label="close modal"]');
+      if (dialog) {
+        modalOpened = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    if (!modalOpened) {
+      if (immediateError) {
+        throw new Error(immediateError?.message || 'Privy export modal rejected.');
+      }
+      throw new Error(`Privy export modal did not open for ${wallet.label || 'account'}. Please try again.`);
+    }
+
     return p;
   };
 
@@ -616,7 +648,7 @@ export function BatchRecovery({ onCopy, onError }) {
         currentCaptureResolverRef.current = resolver;
 
         if (onCopy) onCopy(`Opening export modal for ${accLabel}... Please copy key.`);
-        openExportModalForWallet(wallet);
+        await openExportModalForWallet(wallet);
 
         // Wait for key capture (MUST be a new, unique key!)
         await Promise.race([
