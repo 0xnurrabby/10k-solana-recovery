@@ -124,15 +124,15 @@ export function BatchRecovery({ onCopy, onError }) {
             const phrasePrefix = p.totalPhrases > 1 ? `[Phrase ${p.phraseIndex}/${p.totalPhrases}] ` : '';
             setScanProgress({
               message: `${phrasePrefix}Checking Account ${p.accountIndex} (${p.phantomAddress.slice(0, 4)}...${p.phantomAddress.slice(-4)})`,
-              accountIndex: p.accountIndex,
+              accountIndex: p.totalPhrases > 1 ? `P${p.phraseIndex}/${p.totalPhrases} · Acc ${p.accountIndex}` : p.accountIndex,
               total: null,
               consecutiveEmpty: p.consecutiveEmpty,
             });
           } else if (p.status === 'empty') {
             const phrasePrefix = p.totalPhrases > 1 ? `[Phrase ${p.phraseIndex}/${p.totalPhrases}] ` : '';
             setScanProgress({
-              message: `${phrasePrefix}Account ${p.accountIndex}: No transactions (Empty streak ${p.consecutiveEmpty}/10)`,
-              accountIndex: p.accountIndex,
+              message: `${phrasePrefix}Account ${p.accountIndex}: No transactions (${p.consecutiveEmpty}/10 empty)`,
+              accountIndex: p.totalPhrases > 1 ? `P${p.phraseIndex}/${p.totalPhrases} · Acc ${p.accountIndex}` : p.accountIndex,
               total: null,
               consecutiveEmpty: p.consecutiveEmpty,
             });

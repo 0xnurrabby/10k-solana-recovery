@@ -86,14 +86,17 @@ export function deriveAccountFromSeed(seed, index) {
 
 export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
   try {
-    const initRes = await fetch('/privy-auth/api/v1/siws/init', {
-      method: 'POST',
-      headers: {
-        'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ address: phantomAddress }),
-    });
+    const initRes = await Promise.race([
+      fetch('/privy-auth/api/v1/siws/init', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ address: phantomAddress }),
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('init timeout')), 3000))
+    ]);
 
     const initData = await initRes.json();
     const nonce = initData?.nonce;
@@ -121,14 +124,17 @@ export async function authenticateSubAccountWithPrivy(keypair, phantomAddress) {
     const sig = nacl.sign.detached(msgBytes, keypair.secretKey);
     const signatureBase64 = toBase64(sig);
 
-    const authRes = await fetch('/privy-auth/api/v1/siws/authenticate', {
-      method: 'POST',
-      headers: {
-        'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ message, signature: signatureBase64 }),
-    });
+    const authRes = await Promise.race([
+      fetch('/privy-auth/api/v1/siws/authenticate', {
+        method: 'POST',
+        headers: {
+          'privy-app-id': 'cm66m9fnd014r12wrx2xtd63r',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ message, signature: signatureBase64 }),
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('auth timeout')), 3000))
+    ]);
 
     const authData = await authRes.json();
     const user = authData.user;
@@ -436,10 +442,16 @@ export async function scanSubWallets({
     if (cancelSignal && cancelSignal.isCancelled) break;
 
     const currentPhrase = phrases[pIdx];
-    const seed = Buffer.from(bip39.mnemonicToSeedSync(currentPhrase));
+    let seed;
+    try {
+      seed = Buffer.from(bip39.mnemonicToSeedSync(currentPhrase));
+    } catch {
+      continue;
+    }
+
     let consecutiveEmpty = 0;
     let accountIndex = 0;
-    const batchSize = Math.min(concurrency, 20);
+    const batchSize = 5; // Keep batch 5 so Solana public RPC never hangs or drops socket
 
     while (consecutiveEmpty < gapLimit) {
       if (cancelSignal && cancelSignal.isCancelled) break;
@@ -449,6 +461,8 @@ export async function scanSubWallets({
         batchIndices.push(accountIndex + b);
       }
 
+      if (batchIndices.length === 0) break;
+
       const batchResults = await Promise.all(
         batchIndices.map(async (accIdx) => {
           const derived = deriveAccountFromSeed(seed, accIdx);
@@ -457,13 +471,33 @@ export async function scanSubWallets({
             ? `Phrase ${pIdx + 1} - Account ${accIdx + 1}`
             : `Account ${accIdx + 1}`;
 
+          if (onProgress) {
+            onProgress({
+              status: 'scanning',
+              phraseIndex: pIdx + 1,
+              totalPhrases: phrases.length,
+              accountIndex: accIdx + 1,
+              phantomAddress,
+              consecutiveEmpty,
+              gapLimit,
+              totalFound: allActiveWallets.length,
+              label,
+            });
+          }
+
           let signatures = [];
           try {
-            signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+            signatures = await Promise.race([
+              connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout')), 2500))
+            ]);
           } catch (e) {
-            await new Promise((r) => setTimeout(r, 600));
+            // Immediate retry once with 2s timeout
             try {
-              signatures = await connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 });
+              signatures = await Promise.race([
+                connection.getSignaturesForAddress(keypair.publicKey, { limit: 10 }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout 2')), 2000))
+              ]);
             } catch {}
           }
 
@@ -538,7 +572,7 @@ export async function scanSubWallets({
       }
 
       accountIndex += batchIndices.length;
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 50));
     }
   }
 
