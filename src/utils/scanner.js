@@ -389,8 +389,6 @@ const HELIUS_RPC = 'https://mainnet.helius-rpc.com/?api-key=14fb606d-9e4a-4943-a
 const RPC_ENDPOINTS = [
   HELIUS_RPC,
   typeof window !== 'undefined' ? `${window.location.origin}/solana-rpc` : HELIUS_RPC,
-  'https://api.mainnet-beta.solana.com',
-  'https://api.mainnet.solana.com',
 ];
 let rpcEndpointIndex = 0;
 
@@ -531,9 +529,7 @@ export async function scanSubWallets({
     await new Promise((r) => setTimeout(r, 60));
   }
 
-  // 2. Process Seed Phrases in parallel batches (5 accounts per batch) for high speed
-  const BATCH_SIZE = 5;
-
+  // 2. Process Seed Phrases sequentially with 100% precision
   for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
     if (cancelSignal && cancelSignal.isCancelled) break;
 
@@ -547,22 +543,17 @@ export async function scanSubWallets({
 
     let consecutiveEmpty = 0;
     let accountIndex = 0;
+    let accountRetryCount = 0;
+    const MAX_ACCOUNT_RETRIES = 5;
 
     while (consecutiveEmpty < gapLimit) {
       if (cancelSignal && cancelSignal.isCancelled) break;
 
-      // 1. Derive batch of accounts
-      const batchAccounts = [];
-      for (let b = 0; b < BATCH_SIZE; b++) {
-        const currentIdx = accountIndex + b;
-        batchAccounts.push(deriveAccountFromSeed(seed, currentIdx));
-      }
-
-      // Display scanning progress for this batch
-      const firstAcc = batchAccounts[0];
-      const batchLabel = phrases.length > 1
-        ? `Phrase ${pIdx + 1} - Accounts ${accountIndex + 1}:${accountIndex + batchAccounts.length}`
-        : `Accounts ${accountIndex + 1}:${accountIndex + batchAccounts.length}`;
+      const derived = deriveAccountFromSeed(seed, accountIndex);
+      const { phantomAddress, keypair, path } = derived;
+      const label = phrases.length > 1
+        ? `Phrase ${pIdx + 1} - Account ${accountIndex + 1}`
+        : `Account ${accountIndex + 1}`;
 
       if (onProgress) {
         onProgress({
@@ -570,118 +561,124 @@ export async function scanSubWallets({
           phraseIndex: pIdx + 1,
           totalPhrases: phrases.length,
           accountIndex: accountIndex + 1,
-          phantomAddress: firstAcc.phantomAddress,
+          phantomAddress,
           consecutiveEmpty,
           gapLimit,
           totalFound: allActiveWallets.length,
-          label: batchLabel,
+          label,
         });
       }
 
-      // 2. Query Helius RPC in parallel for all accounts in the batch
-      const rpcResults = await Promise.all(
-        batchAccounts.map((acc) => fetchSignaturesDirect(acc.phantomAddress))
-      );
+      const rpcRes = await fetchSignaturesDirect(phantomAddress);
 
-      // 3. Process results in strict derivation index order
-      for (let b = 0; b < batchAccounts.length; b++) {
-        if (cancelSignal && cancelSignal.isCancelled) break;
-
-        const currentAccountIndex = accountIndex + b;
-        const derived = batchAccounts[b];
-        const { phantomAddress, keypair, path } = derived;
-        const rpcRes = rpcResults[b];
-        const label = phrases.length > 1
-          ? `Phrase ${pIdx + 1} - Account ${currentAccountIndex + 1}`
-          : `Account ${currentAccountIndex + 1}`;
-
-        const signatures = rpcRes.signatures || [];
-
-        if (signatures.length === 0) {
-          consecutiveEmpty++;
+      // CRITICAL: If RPC failed (e.g. temporary network glitch), DO NOT count as empty!
+      // Counting failed RPC as empty causes premature stopping and misses active wallets.
+      if (!rpcRes.success) {
+        accountRetryCount++;
+        if (accountRetryCount <= MAX_ACCOUNT_RETRIES) {
           if (onProgress) {
             onProgress({
-              status: 'empty',
-              phraseIndex: pIdx + 1,
-              totalPhrases: phrases.length,
-              accountIndex: currentAccountIndex + 1,
-              phantomAddress,
-              consecutiveEmpty,
-              gapLimit,
-              totalFound: allActiveWallets.length,
+              status: 'retrying',
               label,
+              attempt: accountRetryCount,
             });
           }
-          if (consecutiveEmpty >= gapLimit) {
-            break;
-          }
+          await new Promise((r) => setTimeout(r, 600 * accountRetryCount));
           continue;
         }
-
-        // Found active account: reset consecutive empty counter!
-        consecutiveEmpty = 0;
-
-        const txDates = signatures
-          .filter((s) => s.blockTime)
-          .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
-
-        const hasJun2025Tx = signatures.some((sig) => {
-          if (!sig.blockTime) return false;
-          const d = new Date(sig.blockTime * 1000);
-          return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
-        });
-
-        if (onProgress) {
-          onProgress({
-            status: 'authenticating',
-            phraseIndex: pIdx + 1,
-            totalPhrases: phrases.length,
-            accountIndex: currentAccountIndex + 1,
-            phantomAddress,
-            txCount: signatures.length,
-            hasJun2025Tx,
-            label,
-          });
-        }
-
-        // Authenticate with Privy automatically
-        const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
-
-        const walletInfo = {
-          type: 'derived_account',
-          phraseIndex: pIdx + 1,
-          accountIndex: currentAccountIndex + 1,
-          label,
-          derivationPath: path,
-          phantomAddress,
-          secretKeyBase58: derived.secretKeyBase58,
-          keypair,
-          txCount: signatures.length,
-          txDates,
-          hasJun2025Tx,
-          embeddedWalletAddress: privyResult?.embeddedWalletAddress || null,
-          isNewUser: privyResult?.isNewUser || false,
-          privyError: privyResult?.error || null,
-          privyMessage: privyResult?.message || null,
-          privySignature: privyResult?.signature || null,
-          privyUserId: privyResult?.user?.id || null,
-        };
-
-        allActiveWallets.push(walletInfo);
-
-        if (onProgress) {
-          onProgress({
-            status: 'found',
-            wallet: walletInfo,
-            totalFound: allActiveWallets.length,
-            consecutiveEmpty: 0,
-            label,
-          });
-        }
+        // If max retries exhausted, advance accountIndex WITHOUT incrementing consecutiveEmpty!
+        accountRetryCount = 0;
+        accountIndex++;
+        continue;
       }
 
-      accountIndex += batchAccounts.length;
-      await new Promise((r) => setTimeout(r, 30));
+      accountRetryCount = 0;
+      const signatures = rpcRes.signatures;
+
+      if (signatures.length === 0) {
+        // Genuine empty account confirmed by blockchain
+        consecutiveEmpty++;
+        if (onProgress) {
+          onProgress({
+            status: 'empty',
+            phraseIndex: pIdx + 1,
+            totalPhrases: phrases.length,
+            accountIndex: accountIndex + 1,
+            phantomAddress,
+            consecutiveEmpty,
+            gapLimit,
+            totalFound: allActiveWallets.length,
+            label,
+          });
+        }
+        accountIndex++;
+        await new Promise((r) => setTimeout(r, 50));
+        continue;
+      }
+
+      // Found active account: reset consecutive empty counter!
+      consecutiveEmpty = 0;
+
+      const txDates = signatures
+        .filter((s) => s.blockTime)
+        .map((s) => new Date(s.blockTime * 1000).toISOString().split('T')[0]);
+
+      const hasJun2025Tx = signatures.some((sig) => {
+        if (!sig.blockTime) return false;
+        const d = new Date(sig.blockTime * 1000);
+        return d.getUTCFullYear() === 2025 && (d.getUTCMonth() === 4 || d.getUTCMonth() === 5);
+      });
+
+      if (onProgress) {
+        onProgress({
+          status: 'authenticating',
+          phraseIndex: pIdx + 1,
+          totalPhrases: phrases.length,
+          accountIndex: accountIndex + 1,
+          phantomAddress,
+          txCount: signatures.length,
+          hasJun2025Tx,
+          label,
+        });
+      }
+
+      // Authenticate with Privy automatically
+      const privyResult = await authenticateSubAccountWithPrivy(keypair, phantomAddress);
+
+      const walletInfo = {
+        type: 'derived_account',
+        phraseIndex: pIdx + 1,
+        accountIndex: accountIndex + 1,
+        label,
+        derivationPath: path,
+        phantomAddress,
+        secretKeyBase58: derived.secretKeyBase58,
+        keypair,
+        txCount: signatures.length,
+        txDates,
+        hasJun2025Tx,
+        embeddedWalletAddress: privyResult?.embeddedWalletAddress || null,
+        isNewUser: privyResult?.isNewUser || false,
+        privyError: privyResult?.error || null,
+        privyMessage: privyResult?.message || null,
+        privySignature: privyResult?.signature || null,
+        privyUserId: privyResult?.user?.id || null,
+      };
+
+      allActiveWallets.push(walletInfo);
+
+      if (onProgress) {
+        onProgress({
+          status: 'found',
+          wallet: walletInfo,
+          totalFound: allActiveWallets.length,
+          consecutiveEmpty: 0,
+          label,
+        });
+      }
+
+      accountIndex++;
+      await new Promise((r) => setTimeout(r, 60));
     }
   }
 
