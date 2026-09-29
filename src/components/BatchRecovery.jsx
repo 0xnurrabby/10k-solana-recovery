@@ -44,6 +44,8 @@ export function BatchRecovery({ onCopy, onError }) {
   const [showAllPrivateKeys, setShowAllPrivateKeys] = useState(false);
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [exportCompleteModal, setExportCompleteModal] = useState(null);
+  const [walletFilter, setWalletFilter] = useState('all');
+  const [isRecheckingAll, setIsRecheckingAll] = useState(false);
 
   const cancelSignalRef = useRef({ isCancelled: false });
   const cancelBatchExportRef = useRef(false);
@@ -824,6 +826,42 @@ export function BatchRecovery({ onCopy, onError }) {
     }
   };
 
+  const handleRecheckAllUnlinked = async () => {
+    const unlinked = discoveredWallets
+      .map((w, idx) => ({ wallet: w, index: idx }))
+      .filter(({ wallet }) => !wallet.embeddedWalletAddress);
+
+    if (unlinked.length === 0) return;
+    setIsRecheckingAll(true);
+    if (onCopy) onCopy(`Re-checking Privy for ${unlinked.length} unlinked wallet(s)...`);
+
+    for (let i = 0; i < unlinked.length; i++) {
+      const { wallet, index } = unlinked[i];
+      try {
+        const res = await authenticateSubAccountWithPrivy(wallet.keypair, wallet.phantomAddress);
+        setDiscoveredWallets((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            embeddedWalletAddress: res.embeddedWalletAddress || null,
+            isNewUser: res.isNewUser || false,
+            privyError: res.error || null,
+            privyMessage: res.message || null,
+            privySignature: res.signature || null,
+            privyUserId: res.user?.id || null,
+          };
+          return updated;
+        });
+      } catch (e) {
+        console.warn('Recheck error:', e);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    setIsRecheckingAll(false);
+    if (onCopy) onCopy('Finished re-checking unlinked wallets with Privy.');
+  };
+
   // Dedicated Export for Real 10K Embedded Private Keys ONLY
   const handleDownload10kKeysTXT = () => {
     if (discoveredWallets.length === 0) return;
@@ -897,6 +935,21 @@ export function BatchRecovery({ onCopy, onError }) {
     URL.revokeObjectURL(url);
     if (onCopy) onCopy('Recovery report (.json) downloaded successfully');
   };
+
+  const totalDiscoveredCount = discoveredWallets.length;
+  const exported10kCount = discoveredWallets.filter((w) => !!w.exported10kKey).length;
+  const embedded10kCount = discoveredWallets.filter((w) => !!w.embeddedWalletAddress).length;
+  const pending10kCount = discoveredWallets.filter((w) => !!w.embeddedWalletAddress && !w.exported10kKey).length;
+  const no10kCount = discoveredWallets.filter((w) => !w.embeddedWalletAddress).length;
+
+  const filteredWallets = discoveredWallets
+    .map((wallet, originalIdx) => ({ wallet, originalIdx }))
+    .filter(({ wallet }) => {
+      if (walletFilter === 'exported_10k') return !!wallet.exported10kKey;
+      if (walletFilter === 'pending_10k') return !!wallet.embeddedWalletAddress && !wallet.exported10kKey;
+      if (walletFilter === 'no_10k') return !wallet.embeddedWalletAddress;
+      return true;
+    });
 
   return (
     <div className="w-full space-y-6">
@@ -1184,8 +1237,100 @@ export function BatchRecovery({ onCopy, onError }) {
             </button>
           </div>
 
+          {/* Interactive Status Filter Tabs */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setWalletFilter('all')}
+              className={`px-3.5 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                walletFilter === 'all'
+                  ? 'bg-black text-white'
+                  : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+              }`}
+            >
+              All Wallets ({totalDiscoveredCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setWalletFilter('exported_10k')}
+              className={`px-3.5 py-1.5 rounded-full font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                walletFilter === 'exported_10k'
+                  ? 'bg-emerald-700 text-white'
+                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+              }`}
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>10K Keys Exported ({exported10kCount})</span>
+            </button>
+            {pending10kCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setWalletFilter('pending_10k')}
+                className={`px-3.5 py-1.5 rounded-full font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                  walletFilter === 'pending_10k'
+                    ? 'bg-amber-600 text-white'
+                    : 'bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>10K Keys Pending ({pending10kCount})</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setWalletFilter('no_10k')}
+              className={`px-3.5 py-1.5 rounded-full font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                walletFilter === 'no_10k'
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+              }`}
+            >
+              <span>Phantom Only / No 10k Linked ({no10kCount})</span>
+            </button>
+          </div>
+
+          {/* Pending 10K Action Alert */}
+          {pending10kCount > 0 && (
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-xs">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>
+                  <strong>{pending10kCount} 10K Embedded Wallet(s) pending export!</strong> Click &quot;Batch Export 10K Keys&quot; to export the remaining ones.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleBatchExportAll}
+                className="px-4 py-2 rounded-full bg-amber-700 hover:bg-amber-800 text-white font-semibold text-xs shrink-0 cursor-pointer transition-colors shadow-xs"
+              >
+                Export Remaining ({pending10kCount})
+              </button>
+            </div>
+          )}
+
+          {/* Unlinked Wallets Explanation Banner */}
+          {walletFilter === 'no_10k' && (
+            <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 text-xs text-gray-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <span className="font-bold text-gray-900 block text-sm">Why are these {no10kCount} accounts listed here?</span>
+                <p className="text-gray-600">
+                  These Phantom sub-accounts had transactions on Solana, but Privy confirms they were never used to create a 10K embedded wallet on 10k.world. Their Phantom private keys are 100% ready above and can be exported at any time.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isRecheckingAll}
+                onClick={handleRecheckAllUnlinked}
+                className="px-4 py-2.5 rounded-xl bg-white hover:bg-gray-100 border border-gray-200 text-gray-800 text-xs font-semibold shrink-0 cursor-pointer inline-flex items-center gap-2 shadow-xs disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRecheckingAll ? 'animate-spin' : ''}`} />
+                <span>{isRecheckingAll ? 'Checking Privy...' : 'Re-check All with Privy'}</span>
+              </button>
+            </div>
+          )}
+
           <div className="space-y-4">
-            {discoveredWallets.map((wallet, idx) => (
+            {filteredWallets.map(({ wallet, originalIdx: idx }) => (
               <div
                 key={wallet.secretKeyBase58 || `${wallet.phraseIndex || 1}-${wallet.accountIndex || idx}`}
                 className="w-full bg-white border border-gray-200/80 rounded-2xl p-5 space-y-4 shadow-sm"
@@ -1479,6 +1624,17 @@ export function BatchRecovery({ onCopy, onError }) {
                 </div>
               </div>
             </div>
+
+            {exportCompleteModal.count < totalDiscoveredCount && (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+                <span className="font-bold block">
+                  Why {exportCompleteModal.count} out of {totalDiscoveredCount} wallets?
+                </span>
+                <p className="text-amber-800 text-[11px]">
+                  These {exportCompleteModal.count} accounts are the ones that had an internal 10K embedded wallet created on Privy. The remaining {totalDiscoveredCount - exportCompleteModal.count} accounts were never linked to 10k.world (or didn&apos;t have an embedded wallet created). All {totalDiscoveredCount} Phantom sub-account private keys are 100% ready and can be downloaded anytime using the &quot;Export Phantom Keys (.txt)&quot; button!
+                </p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
